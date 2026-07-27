@@ -206,6 +206,16 @@ interface FileRow extends ContainerDirectoryEntry {
   mountInfo:  ContainerMountInfo | null;
 }
 
+/**
+ * A locally-unique ID to correlate an IPC request with its response -- no
+ * cryptographic strength needed, so this deliberately avoids
+ * `crypto.randomUUID()`, which isn't reliably present on the `crypto`
+ * global across all Electron/Chromium builds this app runs on.
+ */
+function generateRequestId(): string {
+  return `${ Date.now().toString(36) }-${ Math.random().toString(36).slice(2) }`;
+}
+
 interface Data {
   capabilities:     ContainerFilesCapabilities | null;
   currentPath:      string;
@@ -399,7 +409,7 @@ export default defineComponent({
       this.loading = true;
       this.listError = null;
       this.currentPath = dirPath;
-      const requestId = crypto.randomUUID();
+      const requestId = generateRequestId();
 
       this.listRequestId = requestId;
       ipcRenderer.send('container-files/list', requestId, this.containerId, dirPath);
@@ -458,7 +468,7 @@ export default defineComponent({
       this.previewError = null;
       this.preview = null;
       this.downloadMessage = null;
-      const requestId = crypto.randomUUID();
+      const requestId = generateRequestId();
 
       this.previewRequestId = requestId;
       ipcRenderer.send('container-files/preview', requestId, this.containerId, row.path);

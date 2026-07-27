@@ -29,6 +29,31 @@ import { makeSendToFrame } from '@pkg/window';
 const console = Logging.containerFiles;
 const ipcMainProxy = getIpcMainProxy(console);
 
+/**
+ * Ceiling for a single mount+operate(+unmount) round trip.  None of the
+ * underlying VM operations support cancellation (VMExecutor has no abort
+ * mechanism), so a timeout here doesn't kill whatever's actually stuck --
+ * it just stops the renderer from waiting on it forever.  A stuck operation
+ * this races against may still finish in the background, unobserved; that's
+ * an acceptable trade-off against leaving the UI in an infinite spinner with
+ * no error at all.
+ */
+const OPERATION_TIMEOUT_MS = 20_000;
+
+function withTimeout<T>(promise: Promise<T>, description: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${ description } timed out after ${ OPERATION_TIMEOUT_MS / 1000 }s`)),
+      OPERATION_TIMEOUT_MS,
+    );
+
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (ex) => { clearTimeout(timer); reject(ex) },
+    );
+  });
+}
+
 interface FilesSession {
   namespace: string | undefined;
   senders:   Set<Electron.WebContents>;
@@ -85,9 +110,11 @@ export class ContainerFilesHandler {
 
       const sendToFrame = makeSendToFrame(event.sender, console);
 
-      this.client.getContainerFilesCapabilities(containerId, { namespace })
+      withTimeout(this.client.getContainerFilesCapabilities(containerId, { namespace }), `Checking files support for ${ containerId }`)
         .then(result => sendToFrame('container-files/capabilities', containerId, result))
-        .catch(ex => console.debug(`Failed to get files capabilities for ${ containerId }:`, ex));
+        .catch((ex) => {
+          console.debug(`Failed to get files capabilities for ${ containerId }:`, ex);
+        });
     });
 
     ipcMainProxy.on('container-files/diff', async(event, containerId) => {
@@ -95,10 +122,11 @@ export class ContainerFilesHandler {
       const namespace = this.sessions.get(containerId)?.namespace;
 
       try {
-        const entries = await this.client.getContainerDiff(containerId, { namespace });
+        const entries = await withTimeout(this.client.getContainerDiff(containerId, { namespace }), `Getting diff for ${ containerId }`);
 
         sendToFrame('container-files/diff-result', containerId, entries);
       } catch (ex) {
+        console.error(`Failed to get diff for ${ containerId }:`, ex);
         sendToFrame('container-files/diff-error', containerId, errorMessage(ex));
       }
     });
@@ -108,10 +136,11 @@ export class ContainerFilesHandler {
       const namespace = this.sessions.get(containerId)?.namespace;
 
       try {
-        const mounts = await this.client.getContainerMounts(containerId, { namespace });
+        const mounts = await withTimeout(this.client.getContainerMounts(containerId, { namespace }), `Getting mounts for ${ containerId }`);
 
         sendToFrame('container-files/mounts-result', containerId, mounts);
       } catch (ex) {
+        console.error(`Failed to get mounts for ${ containerId }:`, ex);
         sendToFrame('container-files/mounts-error', containerId, errorMessage(ex));
       }
     });
@@ -125,10 +154,11 @@ export class ContainerFilesHandler {
       const namespace = this.sessions.get(containerId)?.namespace;
 
       try {
-        const result = await this.client.listContainerDirectory(containerId, dirPath, { namespace });
+        const result = await withTimeout(this.client.listContainerDirectory(containerId, dirPath, { namespace }), `Listing ${ dirPath } in ${ containerId }`);
 
         sendToFrame('container-files/list-result', requestId, containerId, result);
       } catch (ex) {
+        console.error(`Failed to list ${ dirPath } in ${ containerId }:`, ex);
         sendToFrame('container-files/list-error', requestId, containerId, errorMessage(ex));
       }
     });
@@ -138,10 +168,11 @@ export class ContainerFilesHandler {
       const namespace = this.sessions.get(containerId)?.namespace;
 
       try {
-        const result = await this.client.statContainerPath(containerId, filePath, { namespace });
+        const result = await withTimeout(this.client.statContainerPath(containerId, filePath, { namespace }), `Stat-ing ${ filePath } in ${ containerId }`);
 
         sendToFrame('container-files/stat-result', requestId, containerId, result);
       } catch (ex) {
+        console.error(`Failed to stat ${ filePath } in ${ containerId }:`, ex);
         sendToFrame('container-files/stat-error', requestId, containerId, errorMessage(ex));
       }
     });
@@ -151,10 +182,11 @@ export class ContainerFilesHandler {
       const namespace = this.sessions.get(containerId)?.namespace;
 
       try {
-        const result = await this.client.readContainerFilePreview(containerId, filePath, { namespace });
+        const result = await withTimeout(this.client.readContainerFilePreview(containerId, filePath, { namespace }), `Reading ${ filePath } in ${ containerId }`);
 
         sendToFrame('container-files/preview-result', requestId, containerId, result);
       } catch (ex) {
+        console.error(`Failed to read ${ filePath } in ${ containerId }:`, ex);
         sendToFrame('container-files/preview-error', requestId, containerId, errorMessage(ex));
       }
     });
@@ -176,9 +208,13 @@ export class ContainerFilesHandler {
           return;
         }
 
-        await this.client.downloadContainerFile(containerId, filePath, destinationPath, { namespace });
+        await withTimeout(
+          this.client.downloadContainerFile(containerId, filePath, destinationPath, { namespace }),
+          `Downloading ${ filePath } from ${ containerId }`,
+        );
         sendToFrame('container-files/download-done', containerId, filePath, destinationPath);
       } catch (ex) {
+        console.error(`Failed to download ${ filePath } from ${ containerId }:`, ex);
         sendToFrame('container-files/download-error', containerId, filePath, errorMessage(ex));
       }
     });

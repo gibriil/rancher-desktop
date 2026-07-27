@@ -378,15 +378,23 @@ export class MobyClient implements ContainerEngineClient {
    */
   protected async detectContainerdAddress(): Promise<string | null> {
     try {
-      const { stdout } = await this.runClient(['info', '--format', '{{json .Containerd}}'], 'pipe');
-      const trimmed = stdout.trim();
+      const { stdout } = await this.runClient(['info', '--format', '{{json .}}'], 'pipe');
+      const info = JSON.parse(stdout.trim());
 
-      if (!trimmed || trimmed === 'null' || trimmed === '<nil>') {
+      // Docker always reports `.Containerd` (it uses containerd internally
+      // as its OCI runtime regardless of storage mode), so its mere presence
+      // does *not* mean the containerd-snapshotter storage feature is
+      // active -- checking for it alone would wrongly treat a classic
+      // overlay2 daemon as snapshotter-backed. The storage driver name is
+      // the reliable signal here: classic mode reports "overlay2";
+      // containerd-snapshotter mode reports "overlayfs".
+      if (info?.Driver !== 'overlayfs') {
         return null;
       }
-      const info = JSON.parse(trimmed);
 
-      return typeof info?.Address === 'string' && info.Address ? info.Address : null;
+      const address = info?.Containerd?.Address;
+
+      return typeof address === 'string' && address ? address : null;
     } catch {
       return null;
     }
