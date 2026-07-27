@@ -14,7 +14,14 @@ import {
 } from './types';
 
 import { VMExecutor } from '@pkg/backend/backend';
+import { listDirectoryAt, statPathAt, readFilePreviewAt, downloadFileAt } from '@pkg/backend/containerClient/containerFsOps';
+import { parseDiffOutput, parseMountsOutput } from '@pkg/backend/containerClient/dockerFormatParsers';
+import {
+  ContainerDiffEntry, ContainerDirectoryListing, ContainerFilePreview, ContainerFilesCapabilities,
+  ContainerFileStat, ContainerMountInfo,
+} from '@pkg/backend/containerClient/fileTypes';
 import dockerRegistry from '@pkg/backend/containerClient/registry';
+import { mountContainerdSnapshot, runCleanups } from '@pkg/backend/containerClient/snapshotMount';
 import { ErrorCommand, spawn, spawnFile } from '@pkg/utils/childProcess';
 import { parseImageReference } from '@pkg/utils/dockerUtils';
 import Logging, { Log } from '@pkg/utils/logging';
@@ -359,6 +366,170 @@ export class MobyClient implements ContainerEngineClient {
     // Handle symlinks that were not found
     for (const [linkName, linkTarget] of Object.entries(links)) {
       console.warn(`Skipping missing link ${ linkName } -> ${ linkTarget }`);
+    }
+  }
+
+  /**
+   * Detect whether this Moby daemon is running with the containerd-snapshotter
+   * storage feature enabled, and if so, the address of the containerd socket
+   * it uses.  See BackendHelper.configureMobyStorage().
+   * @returns The containerd socket address, or null if Moby is using the
+   * classic (non-snapshotter) overlay2 graph driver.
+   */
+  protected async detectContainerdAddress(): Promise<string | null> {
+    try {
+      const { stdout } = await this.runClient(['info', '--format', '{{json .Containerd}}'], 'pipe');
+      const trimmed = stdout.trim();
+
+      if (!trimmed || trimmed === 'null' || trimmed === '<nil>') {
+        return null;
+      }
+      const info = JSON.parse(trimmed);
+
+      return typeof info?.Address === 'string' && info.Address ? info.Address : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Mount a container's live filesystem (classic overlay2 graph driver
+   * mode) inside the VM, without exec-ing into the container.
+   *
+   * While a container is running, `GraphDriver.Data.MergedDir` (from
+   * `docker inspect`) is already a live, mounted, fully-assembled view of
+   * the container's filesystem, so we can use it directly.
+   *
+   * @note Verified empirically against a real dev VM (2026-07-27): Docker
+   * unmounts *and removes* MergedDir entirely when a container is stopped
+   * (confirmed via ENOENT), but `GraphDriver.Data`'s `LowerDir`/`UpperDir`/
+   * `WorkDir` fields remain valid on disk. Manually re-running
+   * `mount -t overlay -o lowerdir=...,upperdir=...,workdir=...` using those
+   * exact fields reconstructs the identical view -- verified by reading a
+   * file's contents back through the reconstructed mount. A container that
+   * was `create`d but never `start`ed has the same layer directories
+   * already populated, so this same recipe covers both cases.
+   */
+  protected async mountContainerClassic(containerId: string): Promise<[string, (() => Promise<void>)[]]> {
+    const { stdout } = await this.runClient(['container', 'inspect', containerId, '--format', '{{json .GraphDriver}}'], 'pipe');
+    const graphDriver = JSON.parse(stdout.trim());
+    const data = graphDriver?.Data ?? {};
+    const { MergedDir: mergedDir, UpperDir: upperDir, WorkDir: workDir, LowerDir: lowerDir } = data;
+
+    if (!upperDir || !workDir || !lowerDir) {
+      throw new Error(`Container ${ containerId } has no overlay2 graph driver data available`);
+    }
+
+    if (mergedDir) {
+      const mountCheck = await this.vm.execCommand(
+        { capture: true, root: true },
+        '/bin/sh', '-c', 'grep -qF " $1 " /proc/mounts && echo yes || echo no', '_', mergedDir,
+      );
+
+      if (mountCheck.trim() === 'yes') {
+        // Already mounted (the container is running); nothing for us to
+        // mount or clean up.
+        return [mergedDir, []];
+      }
+    }
+
+    const cleanups: (() => Promise<void>)[] = [];
+
+    try {
+      const workdir = (await this.vm.execCommand({ capture: true, root: true }, '/bin/mktemp', '-d', '-t', 'rd-container-files-XXXXXX')).trim();
+
+      cleanups.push(() => this.vm.execCommand('/bin/rm', '-rf', workdir));
+
+      await this.vm.execCommand(
+        { root: true }, '/bin/mount', '-t', 'overlay', 'overlay',
+        '-o', `lowerdir=${ lowerDir },upperdir=${ upperDir },workdir=${ workDir }`, workdir,
+      );
+      cleanups.push(async() => {
+        try {
+          await this.vm.execCommand({ root: true }, '/bin/umount', workdir);
+        } catch (ex) {
+          await this.vm.execCommand({ root: true }, '/bin/umount', '-l', workdir);
+        }
+      });
+
+      return [workdir, cleanups];
+    } catch (ex) {
+      await runCleanups(cleanups);
+      throw ex;
+    }
+  }
+
+  /**
+   * Mount a container's live filesystem inside the VM, without exec-ing
+   * into the container.  Dispatches to the containerd-snapshotter mechanism
+   * (shared with NerdctlClient) or the classic overlay2 mechanism depending
+   * on how this Moby daemon is configured.
+   */
+  protected async mountContainer(containerId: string): Promise<[string, (() => Promise<void>)[]]> {
+    const containerdAddress = await this.detectContainerdAddress();
+
+    if (containerdAddress) {
+      return mountContainerdSnapshot(this.vm, { address: containerdAddress, snapshotKey: containerId });
+    }
+
+    return this.mountContainerClassic(containerId);
+  }
+
+  async listContainerDirectory(containerId: string, dirPath: string): Promise<ContainerDirectoryListing> {
+    const [mountRoot, cleanups] = await this.mountContainer(containerId);
+
+    try {
+      return await listDirectoryAt(this.vm, mountRoot, dirPath);
+    } finally {
+      await runCleanups(cleanups);
+    }
+  }
+
+  async statContainerPath(containerId: string, filePath: string): Promise<ContainerFileStat> {
+    const [mountRoot, cleanups] = await this.mountContainer(containerId);
+
+    try {
+      return await statPathAt(this.vm, mountRoot, filePath);
+    } finally {
+      await runCleanups(cleanups);
+    }
+  }
+
+  async readContainerFilePreview(containerId: string, filePath: string): Promise<ContainerFilePreview> {
+    const [mountRoot, cleanups] = await this.mountContainer(containerId);
+
+    try {
+      return await readFilePreviewAt(this.vm, mountRoot, filePath);
+    } finally {
+      await runCleanups(cleanups);
+    }
+  }
+
+  async getContainerDiff(containerId: string): Promise<ContainerDiffEntry[]> {
+    const { stdout } = await this.runClient(['container', 'diff', containerId], 'pipe');
+
+    return parseDiffOutput(stdout);
+  }
+
+  async getContainerMounts(containerId: string): Promise<ContainerMountInfo[]> {
+    const { stdout } = await this.runClient(['container', 'inspect', '--format', '{{json .Mounts}}', containerId], 'pipe');
+
+    return parseMountsOutput(stdout);
+  }
+
+  getContainerFilesCapabilities(): Promise<ContainerFilesCapabilities> {
+    // Both the containerd-snapshotter and classic overlay2 mechanisms work
+    // for running and stopped containers alike (see mountContainerClassic()).
+    return Promise.resolve({ supported: true, reason: null });
+  }
+
+  async downloadContainerFile(containerId: string, filePath: string, destinationPath: string): Promise<void> {
+    const [mountRoot, cleanups] = await this.mountContainer(containerId);
+
+    try {
+      await downloadFileAt(this.vm, mountRoot, filePath, destinationPath);
+    } finally {
+      await runCleanups(cleanups);
     }
   }
 

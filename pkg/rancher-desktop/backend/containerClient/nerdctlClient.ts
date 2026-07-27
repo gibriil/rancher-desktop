@@ -14,7 +14,16 @@ import {
 } from './types';
 
 import { execOptions, VMExecutor } from '@pkg/backend/backend';
+import { listDirectoryAt, statPathAt, readFilePreviewAt, downloadFileAt } from '@pkg/backend/containerClient/containerFsOps';
+import { parseDiffOutput, parseMountsOutput } from '@pkg/backend/containerClient/dockerFormatParsers';
+import {
+  ContainerDiffEntry, ContainerDirectoryListing, ContainerFilePreview, ContainerFilesCapabilities,
+  ContainerFileStat, ContainerMountInfo,
+} from '@pkg/backend/containerClient/fileTypes';
 import dockerRegistry from '@pkg/backend/containerClient/registry';
+import {
+  execCommandWithRetries as execCommandWithRetriesHelper, mountContainerdSnapshot, runCleanups,
+} from '@pkg/backend/containerClient/snapshotMount';
 import { spawn, spawnFile } from '@pkg/utils/childProcess';
 import { parseImageReference } from '@pkg/utils/dockerUtils';
 import Logging, { Log } from '@pkg/utils/logging';
@@ -22,6 +31,9 @@ import { executable } from '@pkg/utils/resources';
 import { defined } from '@pkg/utils/typeUtils';
 
 const console = Logging.nerdctl;
+
+/** The containerd socket that nerdctl always talks to (the bundled k3s containerd). */
+const NERDCTL_CONTAINERD_ADDRESS = '/run/k3s/containerd/containerd.sock';
 
 /**
  * NerdctlClient manages nerdctl/containerd.
@@ -80,14 +92,7 @@ export class NerdctlClient implements ContainerEngineClient {
    * for more info.
    */
   protected async execCommandWithRetries(options: execOptions & { capture: true }, ...command: string[]): Promise<string> {
-    const maxRetries = 10;
-    let result = '';
-
-    for (let i = 0; i < maxRetries && !result; i++) {
-      result = await this.vm.execCommand({ ...options, capture: true }, ...command);
-    }
-
-    return result;
+    return execCommandWithRetriesHelper(this.vm, options, ...command);
   }
 
   /**
@@ -110,30 +115,36 @@ export class NerdctlClient implements ContainerEngineClient {
       cleanups.push(() => this.vm.execCommand(
         '/usr/local/bin/nerdctl', ...namespaceArgs, 'rm', '--force', '--volumes', container));
 
-      const workdir = (await this.execCommandWithRetries({ capture: true }, '/bin/mktemp', '-d', '-t', 'rd-nerdctl-cp-XXXXXX')).trim();
-
-      cleanups.push(() => this.vm.execCommand('/bin/rm', '-rf', workdir));
-
-      const command = await this.execCommandWithRetries({ capture: true, root: true },
-        '/usr/bin/ctr', ...namespaceArgs,
-        '--address=/run/k3s/containerd/containerd.sock', 'snapshot', 'mounts', workdir, container);
-
-      await this.vm.execCommand({ root: true }, ...command.trim().split(' '));
-      cleanups.push(async() => {
-        try {
-          await this.vm.execCommand({ root: true }, '/bin/umount', workdir);
-        } catch (ex) {
-          // Unmount might fail due to being busy; just detach and let it go
-          // away by itself later.
-          await this.vm.execCommand({ root: true }, '/bin/umount', '-l', workdir);
-        }
+      const [workdir, mountCleanups] = await mountContainerdSnapshot(this.vm, {
+        address:     NERDCTL_CONTAINERD_ADDRESS,
+        snapshotKey: container,
+        namespace,
       });
+
+      cleanups.push(...mountCleanups);
 
       return [workdir, cleanups];
     } catch (ex) {
       await this.runCleanups(cleanups);
       throw ex;
     }
+  }
+
+  /**
+   * Mount the given (running or stopped) container's live filesystem inside
+   * the VM, without exec-ing into it.  Unlike mountImage(), no throwaway
+   * container needs to be created first: a container's own ID is already a
+   * valid containerd snapshot key.
+   * @param containerId The container to mount.
+   * @returns The path the container has been mounted on, plus cleanup
+   * functions that must be called in reverse order when done.
+   */
+  async mountContainer(containerId: string, namespace?: string): Promise<[string, (() => Promise<void>)[]]> {
+    return mountContainerdSnapshot(this.vm, {
+      address:     NERDCTL_CONTAINERD_ADDRESS,
+      snapshotKey: containerId,
+      namespace,
+    });
   }
 
   async waitForReady(): Promise<void> {
@@ -225,6 +236,66 @@ export class NerdctlClient implements ContainerEngineClient {
       await spawnFile(tar, extractArgs, { stdio: console });
     } finally {
       await this.runCleanups(cleanups);
+    }
+  }
+
+  async listContainerDirectory(containerId: string, dirPath: string, options?: ContainerBasicOptions): Promise<ContainerDirectoryListing> {
+    const [mountRoot, cleanups] = await this.mountContainer(containerId, options?.namespace);
+
+    try {
+      return await listDirectoryAt(this.vm, mountRoot, dirPath);
+    } finally {
+      await runCleanups(cleanups);
+    }
+  }
+
+  async statContainerPath(containerId: string, filePath: string, options?: ContainerBasicOptions): Promise<ContainerFileStat> {
+    const [mountRoot, cleanups] = await this.mountContainer(containerId, options?.namespace);
+
+    try {
+      return await statPathAt(this.vm, mountRoot, filePath);
+    } finally {
+      await runCleanups(cleanups);
+    }
+  }
+
+  async readContainerFilePreview(containerId: string, filePath: string, options?: ContainerBasicOptions): Promise<ContainerFilePreview> {
+    const [mountRoot, cleanups] = await this.mountContainer(containerId, options?.namespace);
+
+    try {
+      return await readFilePreviewAt(this.vm, mountRoot, filePath);
+    } finally {
+      await runCleanups(cleanups);
+    }
+  }
+
+  async getContainerDiff(containerId: string, options?: ContainerBasicOptions): Promise<ContainerDiffEntry[]> {
+    const args = options?.namespace ? ['--namespace', options.namespace] : [];
+    const { stdout } = await this.runClient([...args, 'container', 'diff', containerId], 'pipe');
+
+    return parseDiffOutput(stdout);
+  }
+
+  async getContainerMounts(containerId: string, options?: ContainerBasicOptions): Promise<ContainerMountInfo[]> {
+    const args = options?.namespace ? ['--namespace', options.namespace] : [];
+    const { stdout } = await this.runClient([...args, 'container', 'inspect', '--format', '{{json .Mounts}}', containerId], 'pipe');
+
+    return parseMountsOutput(stdout);
+  }
+
+  getContainerFilesCapabilities(): Promise<ContainerFilesCapabilities> {
+    // The containerd snapshot mount mechanism works uniformly for both
+    // running and stopped containers.
+    return Promise.resolve({ supported: true, reason: null });
+  }
+
+  async downloadContainerFile(containerId: string, filePath: string, destinationPath: string, options?: ContainerBasicOptions): Promise<void> {
+    const [mountRoot, cleanups] = await this.mountContainer(containerId, options?.namespace);
+
+    try {
+      await downloadFileAt(this.vm, mountRoot, filePath, destinationPath);
+    } finally {
+      await runCleanups(cleanups);
     }
   }
 

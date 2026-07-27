@@ -871,12 +871,40 @@ integrations:
   windows:
     # @no-translate Rancher Desktop, Kubernetes, WSL, Docker
     description: Expose Rancher Desktop's Kubernetes configuration and Docker socket to Windows Subsystem for Linux (WSL) distros
+containerFiles:
+  unavailable: This container's filesystem cannot currently be browsed.
+  loading: Loading files…
+  noFiles: This directory is empty.
+  truncated: 'Showing {shown} of {total} entries.'
+  sessionStopped: The container engine was restarted; reopen this tab to browse again.
+  previewLoading: Loading preview…
+  # @context Shown when a file is too large to preview inline
+  tooLarge: 'File is too large to preview ({size}).'
+  binaryFile: This is a binary file and cannot be previewed.
+  download: Download
+  downloadDone: 'Downloaded to {path}'
+  downloadError: 'Download failed: {error}'
+  # @context Badge shown next to a file that differs from the container's image
+  diff:
+    added: Added
+    changed: Changed
+    deleted: Deleted
+  mounted: Mounted
+  # @context Badge shown in the Files tab breadcrumb bar when the container is not running
+  stoppedIndicator: Stopped
+  table:
+    header:
+      name: Name
+      size: Size
+      modified: Modified
+      permissions: Permissions
 containerInfo:
   fallbackTitle: Container Info
   info: Info
   logs: Logs
   shell: Shell
   stats: Stats
+  files: Files
   search:
     ariaLabel: Search in logs
     clearSearch: Clear search

@@ -13,7 +13,13 @@ import {
   ContainerComposeExecOptions,
   ContainerComposeOptions,
   ContainerComposePortOptions,
+  ContainerDiffEntry,
+  ContainerDirectoryListing,
   ContainerEngineClient,
+  ContainerFilePreview,
+  ContainerFilesCapabilities,
+  ContainerFileStat,
+  ContainerMountInfo,
   ContainerRunClientOptions,
   ContainerRunOptions,
   ContainerStopOptions,
@@ -271,6 +277,34 @@ class MockContainerEngineClient implements ContainerEngineClient {
   }
 
   copyFile(imageID: string, sourcePath: string, destinationDir: string, options?: { namespace?: string; }): Promise<void> {
+    throw new Error('Method not implemented.');
+  }
+
+  listContainerDirectory(containerId: string, dirPath: string, options?: ContainerBasicOptions): Promise<ContainerDirectoryListing> {
+    throw new Error('Method not implemented.');
+  }
+
+  statContainerPath(containerId: string, filePath: string, options?: ContainerBasicOptions): Promise<ContainerFileStat> {
+    throw new Error('Method not implemented.');
+  }
+
+  readContainerFilePreview(containerId: string, filePath: string, options?: ContainerBasicOptions): Promise<ContainerFilePreview> {
+    throw new Error('Method not implemented.');
+  }
+
+  getContainerDiff(containerId: string, options?: ContainerBasicOptions): Promise<ContainerDiffEntry[]> {
+    throw new Error('Method not implemented.');
+  }
+
+  getContainerMounts(containerId: string, options?: ContainerBasicOptions): Promise<ContainerMountInfo[]> {
+    throw new Error('Method not implemented.');
+  }
+
+  getContainerFilesCapabilities(containerId: string, options?: ContainerBasicOptions): Promise<ContainerFilesCapabilities> {
+    throw new Error('Method not implemented.');
+  }
+
+  downloadContainerFile(containerId: string, filePath: string, destinationPath: string, options?: ContainerBasicOptions): Promise<void> {
     throw new Error('Method not implemented.');
   }
 

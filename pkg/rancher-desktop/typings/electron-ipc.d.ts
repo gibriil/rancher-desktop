@@ -5,6 +5,10 @@
 import Electron from 'electron';
 import semver from 'semver';
 
+import type {
+  ContainerDiffEntry, ContainerDirectoryListing, ContainerFilePreview, ContainerFilesCapabilities,
+  ContainerFileStat, ContainerMountInfo,
+} from '@pkg/backend/containerClient/fileTypes';
 import type { ServiceEntry } from '@pkg/backend/k8s';
 import { SnapshotDialog, SnapshotEvent } from '@pkg/main/snapshots/types';
 import type { Direction, RecursivePartial } from '@pkg/utils/typeUtils';
@@ -50,6 +54,19 @@ export interface IpcMainEvents {
   // #region main/containerStats
   'container-stats/start': (containerId: string, intervalSeconds: number, namespace?: string) => void;
   'container-stats/stop':  (containerId: string) => void;
+  // #endregion
+
+  // #region main/containerFiles
+  'container-files/open':     (containerId: string, namespace?: string) => void;
+  'container-files/close':    (containerId: string) => void;
+  'container-files/list':     (requestId: string, containerId: string, dirPath: string) => void;
+  'container-files/stat':     (requestId: string, containerId: string, filePath: string) => void;
+  'container-files/preview':  (requestId: string, containerId: string, filePath: string) => void;
+  'container-files/download': (containerId: string, filePath: string) => void;
+  /** Which paths differ from the container's image (for "modified" badges). */
+  'container-files/diff':     (containerId: string) => void;
+  /** The container's bind/volume mounts (for "mounted" badges). */
+  'container-files/mounts':   (containerId: string) => void;
   // #endregion
 
   // #region main/imageEvents
@@ -237,6 +254,26 @@ export interface IpcRendererEvents {
   'container-stats/processes': (containerId: string, topOutput: string) => void;
   /** Session was terminated by the main process (e.g. engine change). */
   'container-stats/stopped':   (containerId: string) => void;
+  // #endregion
+
+  // #region main/containerFiles
+  'container-files/list-result':        (requestId: string, containerId: string, result: ContainerDirectoryListing) => void;
+  'container-files/list-error':         (requestId: string, containerId: string, message: string) => void;
+  'container-files/stat-result':        (requestId: string, containerId: string, result: ContainerFileStat) => void;
+  'container-files/stat-error':         (requestId: string, containerId: string, message: string) => void;
+  'container-files/preview-result':     (requestId: string, containerId: string, result: ContainerFilePreview) => void;
+  'container-files/preview-error':      (requestId: string, containerId: string, message: string) => void;
+  'container-files/capabilities':       (containerId: string, result: ContainerFilesCapabilities) => void;
+  'container-files/diff-result':        (containerId: string, entries: ContainerDiffEntry[]) => void;
+  'container-files/diff-error':         (containerId: string, message: string) => void;
+  'container-files/mounts-result':      (containerId: string, mounts: ContainerMountInfo[]) => void;
+  'container-files/mounts-error':       (containerId: string, message: string) => void;
+  /** Session was terminated by the main process (e.g. engine change). */
+  'container-files/stopped':            (containerId: string) => void;
+  /** The user cancelled the save dialog; not an error. */
+  'container-files/download-cancelled': (containerId: string, filePath: string) => void;
+  'container-files/download-done':      (containerId: string, filePath: string, hostPath: string) => void;
+  'container-files/download-error':     (containerId: string, filePath: string, message: string) => void;
   // #endregion
 
   // #region dialog

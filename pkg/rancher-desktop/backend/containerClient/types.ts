@@ -1,5 +1,9 @@
 import type { Log } from '@pkg/utils/logging';
 
+import type {
+  ContainerDiffEntry, ContainerDirectoryListing, ContainerFilePreview,
+  ContainerFileStat, ContainerFilesCapabilities, ContainerMountInfo,
+} from './fileTypes';
 import type { ChildProcessByStdio, SpawnOptions } from 'child_process';
 import type { Readable, Writable } from 'stream';
 
@@ -115,6 +119,63 @@ export interface ContainerEngineClient {
    */
   copyFile(imageID: string, sourcePath: string, destinationDir: string): Promise<void>;
   copyFile(imageID: string, sourcePath: string, destinationDir: string, options: { namespace?: string }): Promise<void>;
+
+  /**
+   * List the contents of a single directory inside a container's live
+   * filesystem, without exec-ing into the container.  Works for both
+   * running and stopped containers.
+   * @param containerId The container to browse.
+   * @param dirPath The directory to list, as an absolute path inside the
+   * container (e.g. "/etc").
+   */
+  listContainerDirectory(containerId: string, dirPath: string, options?: ContainerBasicOptions): Promise<ContainerDirectoryListing>;
+
+  /**
+   * Stat a single path inside a container's live filesystem, without
+   * exec-ing into the container.
+   * @param containerId The container to inspect.
+   * @param filePath The path to stat, as an absolute path inside the
+   * container.
+   */
+  statContainerPath(containerId: string, filePath: string, options?: ContainerBasicOptions): Promise<ContainerFileStat>;
+
+  /**
+   * Read a size- and type-capped preview of a file inside a container,
+   * without exec-ing into the container.
+   * @param containerId The container to read from.
+   * @param filePath The file to read, as an absolute path inside the
+   * container.
+   */
+  readContainerFilePreview(containerId: string, filePath: string, options?: ContainerBasicOptions): Promise<ContainerFilePreview>;
+
+  /**
+   * Get the set of paths added, changed, or deleted relative to the
+   * container's image (i.e. `docker diff` / `nerdctl diff`).
+   */
+  getContainerDiff(containerId: string, options?: ContainerBasicOptions): Promise<ContainerDiffEntry[]>;
+
+  /**
+   * Get the bind/volume mounts affecting a container.
+   */
+  getContainerMounts(containerId: string, options?: ContainerBasicOptions): Promise<ContainerMountInfo[]>;
+
+  /**
+   * Copy a single file out of a container's live filesystem to a host path,
+   * without exec-ing into the container.  Used for the "too large, download
+   * only" preview affordance.
+   * @param containerId The container to copy from.
+   * @param filePath The file to copy, as an absolute path inside the
+   * container.
+   * @param destinationPath The destination file path, on the host.
+   */
+  downloadContainerFile(containerId: string, filePath: string, destinationPath: string, options?: ContainerBasicOptions): Promise<void>;
+
+  /**
+   * Determine whether this container's filesystem can currently be browsed,
+   * and why not if it can't (e.g. an engine/storage combination that has no
+   * way to expose the container's filesystem without exec-ing into it).
+   */
+  getContainerFilesCapabilities(containerId: string, options?: ContainerBasicOptions): Promise<ContainerFilesCapabilities>;
 
   /**
    * Get all tags available for the given image name.
