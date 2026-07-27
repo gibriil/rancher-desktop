@@ -890,8 +890,10 @@ containerFiles:
     changed: Changed
     deleted: Deleted
   mounted: Mounted
-  # @context Badge shown in the Files tab breadcrumb bar when the container is not running
+  # @context Badge shown in the Files tab header when the container is not running
   stoppedIndicator: Stopped
+  # @context Tooltip on a symlink whose target resolves outside the container's filesystem; such links are shown but never followed
+  symlinkEscapesRoot: Link target is outside the container filesystem
   table:
     header:
       name: Name
