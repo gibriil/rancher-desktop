@@ -159,13 +159,7 @@ export default defineComponent({
         return [];
       }
 
-      return [...this.node.entries].sort((a, b) => {
-        if ((a.kind === 'directory') !== (b.kind === 'directory')) {
-          return a.kind === 'directory' ? -1 : 1;
-        }
-
-        return a.name.localeCompare(b.name);
-      });
+      return [...this.node.entries].sort((a, b) => a.name.localeCompare(b.name));
     },
   },
   methods: {

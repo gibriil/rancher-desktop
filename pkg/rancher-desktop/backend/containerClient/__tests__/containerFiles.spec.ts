@@ -73,11 +73,11 @@ const MOUNT_ROOT = '/tmp/rd-container-files-test';
 describe('listDirectoryAt', () => {
   it('parses entries and flags symlinks that escape the mount', async() => {
     const listScript = [
-      '0\tregular file\t42\t1700000000\t-rw-r--r--\t\t',
+      '0\tregular file\t42\t1700000000\t-rw-r--r--\t\t\t0',
       'NAME\tregular.txt',
-      '1\tsymbolic link\t\t\tlrwxrwxrwx\t/etc/shadow\t/etc/shadow',
+      '1\tsymbolic link\t\t\tlrwxrwxrwx\t/etc/shadow\t/etc/shadow\t0',
       'NAME\tevil-link',
-      `1\tsymbolic link\t\t\tlrwxrwxrwx\tconf.txt\t${ MOUNT_ROOT }/conf.txt`,
+      `1\tsymbolic link\t\t\tlrwxrwxrwx\tconf.txt\t${ MOUNT_ROOT }/conf.txt\t1`,
       'NAME\tsafe-link',
     ].join('\n');
 
@@ -115,7 +115,7 @@ describe('listDirectoryAt', () => {
 
   it('reports truncation when there are more entries than the cap', async() => {
     const listScript = [
-      '0\tregular file\t1\t1700000000\t-rw-r--r--\t\t',
+      '0\tregular file\t1\t1700000000\t-rw-r--r--\t\t\t0',
       'NAME\tonly-entry-returned',
     ].join('\n');
     const vm = mockVM({ countScript: '5000\n', listScript });
@@ -123,6 +123,44 @@ describe('listDirectoryAt', () => {
 
     expect(result.totalEntryCount).toBe(5000);
     expect(result.truncated).toBe(true);
+  });
+});
+
+describe('listDirectoryAt against a runtime-fs (procfs) root', () => {
+  const RUNTIME_ROOT = '/proc/4242/root';
+
+  it('flags a symlink as escaping when its resolved target does not exist when rejoined with mountRoot', async() => {
+    // Simulates /etc/mtab -> /proc/mounts -> /proc/4242/mounts: readlink -f
+    // fully resolves it (since /proc is kernel-global), but that path
+    // doesn't exist as /proc/4242/root/proc/4242/mounts, so rejoinok is 0.
+    const listScript = [
+      '1\tsymbolic link\t\t\tlrwxrwxrwx\t/proc/mounts\t/proc/4242/mounts\t0',
+      'NAME\tmtab',
+    ].join('\n');
+
+    const vm = mockVM({ countScript: '1\n', listScript });
+    const result = await listDirectoryAt(vm, RUNTIME_ROOT, '/etc');
+
+    expect(result.entries).toEqual([
+      expect.objectContaining({ name: 'mtab', kind: 'symlink', symlinkEscapesRoot: true }),
+    ]);
+  });
+
+  it('does not flag an ordinary in-container symlink whose resolved target rejoins with mountRoot', async() => {
+    // Simulates /etc/os-release -> ../usr/lib/os-release: readlink -f
+    // resolves it to the bare container-relative /usr/lib/os-release, which
+    // *does* exist when rejoined as /proc/4242/root/usr/lib/os-release.
+    const listScript = [
+      '1\tsymbolic link\t\t\tlrwxrwxrwx\t../usr/lib/os-release\t/usr/lib/os-release\t1',
+      'NAME\tos-release',
+    ].join('\n');
+
+    const vm = mockVM({ countScript: '1\n', listScript });
+    const result = await listDirectoryAt(vm, RUNTIME_ROOT, '/etc');
+
+    expect(result.entries).toEqual([
+      expect.objectContaining({ name: 'os-release', kind: 'symlink', symlinkEscapesRoot: false }),
+    ]);
   });
 });
 

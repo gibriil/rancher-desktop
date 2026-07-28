@@ -21,6 +21,7 @@ import {
   ContainerFileStat, ContainerMountInfo,
 } from '@pkg/backend/containerClient/fileTypes';
 import dockerRegistry from '@pkg/backend/containerClient/registry';
+import { isRuntimeFsRoot, resolveRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
 import {
   execCommandWithRetries as execCommandWithRetriesHelper, mountContainerdSnapshot, runCleanups,
 } from '@pkg/backend/containerClient/snapshotMount';
@@ -131,15 +132,65 @@ export class NerdctlClient implements ContainerEngineClient {
   }
 
   /**
+   * Parse the `Running`/`Pid` fields out of a `container inspect --format
+   * '{{json .State}}'` result, defaulting to "not running" on any
+   * unexpected shape so callers fall back to the snapshot mount rather than
+   * throwing.
+   */
+  private parseContainerState(stdout: string): { running: boolean, pid: number } {
+    try {
+      const state = JSON.parse(stdout.trim());
+
+      return { running: state?.Running === true, pid: Number(state?.Pid) || 0 };
+    } catch {
+      return { running: false, pid: 0 };
+    }
+  }
+
+  /**
+   * If mountRoot is a live runtime-fs root (see runtimeFsMount.ts) and ex
+   * indicates the underlying operation failed, remap it to a clear message
+   * about the container having stopped or restarted mid-browse, rather than
+   * whatever raw failure a vanished /proc/<pid>/root produces.
+   */
+  private remapRuntimeFsError(mountRoot: string, containerId: string, ex: unknown): unknown {
+    if (isRuntimeFsRoot(mountRoot)) {
+      return new Error(`Container ${ containerId } appears to have stopped or restarted while browsing; refresh and try again.`, { cause: ex });
+    }
+
+    return ex;
+  }
+
+  /**
    * Mount the given (running or stopped) container's live filesystem inside
    * the VM, without exec-ing into it.  Unlike mountImage(), no throwaway
    * container needs to be created first: a container's own ID is already a
    * valid containerd snapshot key.
+   *
+   * For a *running* container, this prefers the container's own live
+   * runtime mount namespace (via runtimeFsMount.ts) over the containerd
+   * snapshot, since the snapshot only ever reflects image layers + the
+   * writable layer -- never /proc, /sys, /dev, tmpfs, or bind/volume mounts
+   * the OCI runtime adds at container start. Stopped containers have no
+   * live process to reach, so they keep using the snapshot mount as before.
    * @param containerId The container to mount.
    * @returns The path the container has been mounted on, plus cleanup
    * functions that must be called in reverse order when done.
    */
   async mountContainer(containerId: string, namespace?: string): Promise<[string, (() => Promise<void>)[]]> {
+    const namespaceArgs = namespace === undefined ? [] : ['--namespace', namespace];
+    const { stdout } = await this.runClient(
+      [...namespaceArgs, 'container', 'inspect', '--format', '{{json .State}}', containerId], 'pipe');
+    const { running, pid } = this.parseContainerState(stdout);
+
+    if (running && pid) {
+      const runtimeRoot = await resolveRuntimeFsRoot(this.vm, pid, containerId);
+
+      if (runtimeRoot) {
+        return [runtimeRoot, []];
+      }
+    }
+
     return mountContainerdSnapshot(this.vm, {
       address:     NERDCTL_CONTAINERD_ADDRESS,
       snapshotKey: containerId,
@@ -244,6 +295,8 @@ export class NerdctlClient implements ContainerEngineClient {
 
     try {
       return await listDirectoryAt(this.vm, mountRoot, dirPath);
+    } catch (ex) {
+      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
     } finally {
       await runCleanups(cleanups);
     }
@@ -254,6 +307,8 @@ export class NerdctlClient implements ContainerEngineClient {
 
     try {
       return await statPathAt(this.vm, mountRoot, filePath);
+    } catch (ex) {
+      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
     } finally {
       await runCleanups(cleanups);
     }
@@ -264,6 +319,8 @@ export class NerdctlClient implements ContainerEngineClient {
 
     try {
       return await readFilePreviewAt(this.vm, mountRoot, filePath);
+    } catch (ex) {
+      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
     } finally {
       await runCleanups(cleanups);
     }
@@ -284,8 +341,9 @@ export class NerdctlClient implements ContainerEngineClient {
   }
 
   getContainerFilesCapabilities(): Promise<ContainerFilesCapabilities> {
-    // The containerd snapshot mount mechanism works uniformly for both
-    // running and stopped containers.
+    // Browsing works uniformly for both running and stopped containers --
+    // mountContainer() picks the live runtime-fs view or the containerd
+    // snapshot mount depending on container state, transparently to callers.
     return Promise.resolve({ supported: true, reason: null });
   }
 
@@ -294,6 +352,8 @@ export class NerdctlClient implements ContainerEngineClient {
 
     try {
       await downloadFileAt(this.vm, mountRoot, filePath, destinationPath);
+    } catch (ex) {
+      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
     } finally {
       await runCleanups(cleanups);
     }

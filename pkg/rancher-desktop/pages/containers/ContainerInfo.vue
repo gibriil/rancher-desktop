@@ -134,6 +134,7 @@
           v-if="containerId && activeTab === 'tab-files'"
           :container-id="containerId"
           :is-container-running="isRunning"
+          :container-state="containerState"
           :namespace="namespace"
         />
       </div>
@@ -204,6 +205,8 @@ const isRunning = computed(() => {
   }
   return currentContainer.value.state === 'running';
 });
+
+const containerState = computed(() => currentContainer.value?.state || '');
 
 // Watchers
 watch(containerName, (name) => {

@@ -13,11 +13,10 @@
     <template v-else>
       <div class="files-header">
         <badge-state
-          v-if="!isContainerRunning"
-          color="bg-darker"
-          :label="t('containerFiles.stoppedIndicator')"
-          class="stopped-indicator"
-          data-testid="files-stopped-indicator"
+          :color="isContainerRunning ? 'bg-success' : 'bg-darker'"
+          :label="containerState"
+          class="state-indicator"
+          data-testid="files-state-indicator"
         />
         <button
           class="btn btn-sm role-tertiary refresh-btn"
@@ -202,6 +201,10 @@ export default defineComponent({
     isContainerRunning: {
       type:    Boolean,
       default: false,
+    },
+    containerState: {
+      type:    String,
+      default: '',
     },
     namespace: {
       type:    String,
@@ -537,12 +540,12 @@ export default defineComponent({
   justify-content: flex-end;
   gap: 0.5rem;
 
-  .stopped-indicator {
+  .state-indicator {
     margin-right: auto;
-    // Same rendered size as the "Exited" state pill on the containers
-    // listing (pages/Containers.vue's badge-state, which gets `.85em`
-    // from `.sortable-table td .badge-state` against that table's
-    // unmodified 14px/1rem ambient text size).
+    // Same rendered size as the state pill on the containers listing
+    // (pages/Containers.vue's badge-state, which gets `.85em` from
+    // `.sortable-table td .badge-state` against that table's unmodified
+    // 14px/1rem ambient text size).
     font-size: 0.85rem;
   }
 }

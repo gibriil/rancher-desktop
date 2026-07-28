@@ -21,6 +21,7 @@ import {
   ContainerFileStat, ContainerMountInfo,
 } from '@pkg/backend/containerClient/fileTypes';
 import dockerRegistry from '@pkg/backend/containerClient/registry';
+import { isRuntimeFsRoot, resolveRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
 import { mountContainerdSnapshot, runCleanups } from '@pkg/backend/containerClient/snapshotMount';
 import { ErrorCommand, spawn, spawnFile } from '@pkg/utils/childProcess';
 import { parseImageReference } from '@pkg/utils/dockerUtils';
@@ -401,12 +402,47 @@ export class MobyClient implements ContainerEngineClient {
   }
 
   /**
+   * Parse the `Running`/`Pid` fields out of a `container inspect --format
+   * '{{json .State}}'` result, defaulting to "not running" on any
+   * unexpected shape so callers fall back to the snapshot/overlay mount
+   * rather than throwing.
+   */
+  private parseContainerState(stdout: string): { running: boolean, pid: number } {
+    try {
+      const state = JSON.parse(stdout.trim());
+
+      return { running: state?.Running === true, pid: Number(state?.Pid) || 0 };
+    } catch {
+      return { running: false, pid: 0 };
+    }
+  }
+
+  /**
+   * If mountRoot is a live runtime-fs root (see runtimeFsMount.ts) and ex
+   * indicates the underlying operation failed, remap it to a clear message
+   * about the container having stopped or restarted mid-browse, rather than
+   * whatever raw failure a vanished /proc/<pid>/root produces.
+   */
+  private remapRuntimeFsError(mountRoot: string, containerId: string, ex: unknown): unknown {
+    if (isRuntimeFsRoot(mountRoot)) {
+      return new Error(`Container ${ containerId } appears to have stopped or restarted while browsing; refresh and try again.`, { cause: ex });
+    }
+
+    return ex;
+  }
+
+  /**
    * Mount a container's live filesystem (classic overlay2 graph driver
    * mode) inside the VM, without exec-ing into the container.
    *
-   * While a container is running, `GraphDriver.Data.MergedDir` (from
-   * `docker inspect`) is already a live, mounted, fully-assembled view of
-   * the container's filesystem, so we can use it directly.
+   * This is now the fallback for a running container whose live runtime-fs
+   * root (see mountContainer() below) couldn't be resolved, plus the
+   * primary path for a stopped container. While a container is running,
+   * `GraphDriver.Data.MergedDir` (from `docker inspect`) is already a live,
+   * mounted, fully-assembled view of the container's filesystem, so we can
+   * use it directly -- though it, like the snapshot mount, only ever
+   * reflects image layers + the writable layer, not /proc/etc., which is
+   * exactly why mountContainer() prefers the runtime-fs root when it can.
    *
    * @note Verified empirically against a real dev VM (2026-07-27): Docker
    * unmounts *and removes* MergedDir entirely when a container is stopped
@@ -469,11 +505,29 @@ export class MobyClient implements ContainerEngineClient {
 
   /**
    * Mount a container's live filesystem inside the VM, without exec-ing
-   * into the container.  Dispatches to the containerd-snapshotter mechanism
-   * (shared with NerdctlClient) or the classic overlay2 mechanism depending
-   * on how this Moby daemon is configured.
+   * into the container.
+   *
+   * For a *running* container, prefers the container's own live runtime
+   * mount namespace (via runtimeFsMount.ts) over either storage mode's
+   * layers-only mount, since neither the containerd snapshot nor
+   * `MergedDir` ever reflect /proc, /sys, /dev, tmpfs, or bind/volume
+   * mounts the OCI runtime adds at container start. Otherwise, dispatches
+   * to the containerd-snapshotter mechanism (shared with NerdctlClient) or
+   * the classic overlay2 mechanism depending on how this Moby daemon is
+   * configured -- unchanged from before for stopped containers.
    */
   protected async mountContainer(containerId: string): Promise<[string, (() => Promise<void>)[]]> {
+    const { stdout } = await this.runClient(['container', 'inspect', containerId, '--format', '{{json .State}}'], 'pipe');
+    const { running, pid } = this.parseContainerState(stdout);
+
+    if (running && pid) {
+      const runtimeRoot = await resolveRuntimeFsRoot(this.vm, pid, containerId);
+
+      if (runtimeRoot) {
+        return [runtimeRoot, []];
+      }
+    }
+
     const containerdAddress = await this.detectContainerdAddress();
 
     if (containerdAddress) {
@@ -488,6 +542,8 @@ export class MobyClient implements ContainerEngineClient {
 
     try {
       return await listDirectoryAt(this.vm, mountRoot, dirPath);
+    } catch (ex) {
+      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
     } finally {
       await runCleanups(cleanups);
     }
@@ -498,6 +554,8 @@ export class MobyClient implements ContainerEngineClient {
 
     try {
       return await statPathAt(this.vm, mountRoot, filePath);
+    } catch (ex) {
+      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
     } finally {
       await runCleanups(cleanups);
     }
@@ -508,6 +566,8 @@ export class MobyClient implements ContainerEngineClient {
 
     try {
       return await readFilePreviewAt(this.vm, mountRoot, filePath);
+    } catch (ex) {
+      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
     } finally {
       await runCleanups(cleanups);
     }
@@ -526,8 +586,10 @@ export class MobyClient implements ContainerEngineClient {
   }
 
   getContainerFilesCapabilities(): Promise<ContainerFilesCapabilities> {
-    // Both the containerd-snapshotter and classic overlay2 mechanisms work
-    // for running and stopped containers alike (see mountContainerClassic()).
+    // Browsing works uniformly for both running and stopped containers --
+    // mountContainer() picks the live runtime-fs view, the containerd
+    // snapshot mount, or the classic overlay2 mount depending on container
+    // state and storage mode, transparently to callers.
     return Promise.resolve({ supported: true, reason: null });
   }
 
@@ -536,6 +598,8 @@ export class MobyClient implements ContainerEngineClient {
 
     try {
       await downloadFileAt(this.vm, mountRoot, filePath, destinationPath);
+    } catch (ex) {
+      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
     } finally {
       await runCleanups(cleanups);
     }

@@ -17,6 +17,7 @@ import { VMExecutor } from '@pkg/backend/backend';
 import {
   ContainerDirectoryEntry, ContainerDirectoryListing, ContainerFileKind, ContainerFilePreview, ContainerFileStat,
 } from '@pkg/backend/containerClient/fileTypes';
+import { isRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
 
 const DEFAULT_MAX_ENTRIES = 2_000;
 const DEFAULT_MAX_PREVIEW_BYTES = 1_048_576; // 1 MiB
@@ -25,23 +26,33 @@ const DEFAULT_MAX_PREVIEW_BYTES = 1_048_576; // 1 MiB
  * Shell snippet (POSIX/busybox-safe) that stats whatever path is currently
  * named "$name" and prints a single TSV line describing it.  Assumes $name
  * is already set by the caller (either from a directory-listing loop
- * variable, or a one-off assignment for a single-path stat).
+ * variable, or a one-off assignment for a single-path stat), and that the
+ * caller's own mountRoot is available as its third positional parameter
+ * ($3), used below to verify a symlink's resolved target is actually
+ * reachable by rejoining it with mountRoot -- see buildEntry()'s use of
+ * "rejoinok" for why this matters specifically for a runtime-fs root.
  */
 const STAT_BODY_SCRIPT = `
 if [ -L "$name" ]; then
   islink=1
   target=$(readlink -- "$name" 2>/dev/null)
   resolved=$(readlink -f -- "$name" 2>/dev/null)
+  if [ -n "$resolved" ] && { [ -e "$3$resolved" ] || [ -L "$3$resolved" ]; }; then
+    rejoinok=1
+  else
+    rejoinok=0
+  fi
 else
   islink=0
   target=""
   resolved=""
+  rejoinok=0
 fi
 ftype=$(stat -c %F -- "$name" 2>/dev/null)
 size=$(stat -c %s -- "$name" 2>/dev/null)
 mtime=$(stat -c %Y -- "$name" 2>/dev/null)
 mode=$(stat -c %A -- "$name" 2>/dev/null)
-printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$islink" "$ftype" "$size" "$mtime" "$mode" "$target" "$resolved"
+printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$islink" "$ftype" "$size" "$mtime" "$mode" "$target" "$resolved" "$rejoinok"
 `.trim();
 
 function toAbsolute(mountRoot: string, containerPath: string): string {
@@ -75,18 +86,19 @@ interface RawStatFields {
   mode:     string;
   target:   string;
   resolved: string;
+  rejoinOk: boolean;
 }
 
 function parseStatLine(line: string): RawStatFields | null {
   const fields = line.split('\t');
 
-  if (fields.length < 7) {
+  if (fields.length < 8) {
     return null;
   }
-  const [isLink, fileType, size, mtime, mode, target, resolved] = fields;
+  const [isLink, fileType, size, mtime, mode, target, resolved, rejoinOk] = fields;
 
   return {
-    isLink: isLink === '1', fileType, size, mtime, mode, target, resolved,
+    isLink: isLink === '1', fileType, size, mtime, mode, target, resolved, rejoinOk: rejoinOk === '1',
   };
 }
 
@@ -109,7 +121,24 @@ function buildEntry(name: string, containerPath: string, mountRoot: string, raw:
   let symlinkEscapesRoot = false;
 
   if (raw.isLink && raw.resolved) {
-    symlinkEscapesRoot = raw.resolved !== mountRoot && !raw.resolved.startsWith(`${ mountRoot }/`);
+    // A runtime-fs root (see runtimeFsMount.ts) is a /proc/<pid>/root magic
+    // symlink: the kernel resolves paths through it against the *target
+    // process's own* mount namespace, so a canonicalized path never comes
+    // back prefixed with our mountRoot string -- even for a symlink that's
+    // entirely internal to the container. That's not an escape in the usual
+    // sense (the kernel structurally can't resolve ".." past that
+    // namespace's own root via this mechanism), but it does mean we can't
+    // just compare against mountRoot's prefix like the real-mount case
+    // below. Instead, STAT_BODY_SCRIPT already checked whether rejoining
+    // the resolved path with mountRoot actually exists ("rejoinok") -- most
+    // symlinks do (ordinary in-container files); a symlink that bottoms out
+    // in procfs's *own* internal magic links (e.g. /etc/mtab -> /proc/mounts
+    // -> /proc/self/mounts, which fully canonicalizes to a real VM-global
+    // /proc/<pid>/mounts) does not, and is treated the same as an escaping
+    // link -- see resolveRegularFileAt()'s matching check and comment.
+    symlinkEscapesRoot = isRuntimeFsRoot(mountRoot)
+      ? !raw.rejoinOk
+      : raw.resolved !== mountRoot && !raw.resolved.startsWith(`${ mountRoot }/`);
   }
 
   return {
@@ -157,7 +186,7 @@ find . -mindepth 1 -maxdepth 1 | head -n "$2" | while IFS= read -r raw; do
 done
 `;
   const raw = await vm.execCommand(
-    { capture: true, root: true }, '/bin/sh', '-c', listScript, '_', absDir, String(maxEntries),
+    { capture: true, root: true }, '/bin/sh', '-c', listScript, '_', absDir, String(maxEntries), mountRoot,
   );
 
   const entries: ContainerDirectoryEntry[] = [];
@@ -199,7 +228,7 @@ ${ STAT_BODY_SCRIPT }
   let raw: string;
 
   try {
-    raw = await vm.execCommand({ capture: true, root: true }, '/bin/sh', '-c', script, '_', dir, name);
+    raw = await vm.execCommand({ capture: true, root: true }, '/bin/sh', '-c', script, '_', dir, name, mountRoot);
   } catch (ex) {
     throw new Error(`Path not found: ${ filePath }`, { cause: ex });
   }
@@ -231,15 +260,58 @@ export async function resolveRegularFileAt(
       throw new Error(`Cannot ${ purpose } ${ filePath }: symlink target is outside the container filesystem`);
     }
 
+    const runtimeFs = isRuntimeFsRoot(mountRoot);
     const absPath = toAbsolute(mountRoot, filePath);
-    const resolvedAbs = (await vm.execCommand(
-      { capture: true, root: true }, '/bin/sh', '-c', 'readlink -f -- "$1"', '_', absPath,
-    )).trim();
+    let resolvedAbs: string;
 
-    if (resolvedAbs !== mountRoot && !resolvedAbs.startsWith(`${ mountRoot }/`)) {
-      throw new Error(`Cannot ${ purpose } ${ filePath }: symlink target is outside the container filesystem`);
+    if (runtimeFs) {
+      // Canonicalizing a /proc/<pid>/root-rooted *absolute* path directly
+      // can fail outright for a relative symlink target (readlink -f loses
+      // the path once it crosses the magic-symlink boundary) -- cd into the
+      // symlink's own directory first and resolve the bare name instead,
+      // matching the pattern STAT_BODY_SCRIPT already uses. Verified
+      // empirically against a real dev VM (2026-07-28).
+      const dir = path.posix.dirname(absPath);
+      const name = path.posix.basename(absPath);
+
+      resolvedAbs = (await vm.execCommand(
+        { capture: true, root: true }, '/bin/sh', '-c', 'cd "$1" && readlink -f -- "$2"', '_', dir, name,
+      )).trim();
+    } else {
+      resolvedAbs = (await vm.execCommand(
+        { capture: true, root: true }, '/bin/sh', '-c', 'readlink -f -- "$1"', '_', absPath,
+      )).trim();
     }
-    targetPath = resolvedAbs.slice(mountRoot.length) || '/';
+
+    if (runtimeFs) {
+      // Resolved through the container's own mount namespace: comes back
+      // already container-relative (see buildEntry()'s symlinkEscapesRoot
+      // comment above), with no mountRoot prefix to strip -- statPathAt()
+      // below re-applies mountRoot itself.
+      //
+      // @note Known, safely-failing limitation (verified against a real dev
+      // VM, 2026-07-28): a symlink chain that bottoms out in *procfs's own*
+      // internal magic links (e.g. the very common /etc/mtab -> /proc/mounts
+      // -> /proc/self/mounts) fully canonicalizes to a real, VM-global path
+      // like /proc/<pid>/mounts -- readlink -f can walk all the way through
+      // it since /proc is a kernel-global, pid-addressable subsystem, but
+      // that path then fails to re-resolve when rejoined with mountRoot
+      // (there's no nested /proc/<pid>/root/proc/<pid>/mounts). This throws
+      // "not found" rather than previewing successfully. Deliberately not
+      // "fixed" by reading the VM-absolute path directly instead: doing so
+      // for *any* resolved path would let a crafted symlink to something
+      // that only exists on the VM (not inside the container) read host
+      // files through the preview/download UI.
+      if (!resolvedAbs) {
+        throw new Error(`Cannot ${ purpose } ${ filePath }: symlink target is outside the container filesystem`);
+      }
+      targetPath = resolvedAbs;
+    } else {
+      if (resolvedAbs !== mountRoot && !resolvedAbs.startsWith(`${ mountRoot }/`)) {
+        throw new Error(`Cannot ${ purpose } ${ filePath }: symlink target is outside the container filesystem`);
+      }
+      targetPath = resolvedAbs.slice(mountRoot.length) || '/';
+    }
     targetStat = await statPathAt(vm, mountRoot, targetPath);
   }
 
