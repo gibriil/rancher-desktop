@@ -17,12 +17,14 @@ import path from 'path';
 import { VMExecutor } from '@pkg/backend/backend';
 import {
   ContainerDirectoryEntry, ContainerDirectoryListing, ContainerFileKind, ContainerFilePreview, ContainerFileStat,
+  ContainerSearchMatch, ContainerSearchResult,
 } from '@pkg/backend/containerClient/fileTypes';
 import { isRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
 import { execCommandWithRetries } from '@pkg/backend/containerClient/snapshotMount';
 
 const DEFAULT_MAX_ENTRIES = 2_000;
 const DEFAULT_MAX_PREVIEW_BYTES = 1_048_576; // 1 MiB
+const DEFAULT_MAX_MATCHES = 500;
 
 /**
  * Shell snippet (POSIX/busybox-safe) that stats whatever path is currently
@@ -416,4 +418,92 @@ export async function downloadFileAt(vm: VMExecutor, mountRoot: string, filePath
   }
 
   await vm.copyFileOut(absTarget, hostDestPath);
+}
+
+/**
+ * Orders two absolute paths the way the tree view displays them: compared
+ * segment-by-segment with `localeCompare` (matching ContainerFileTreeNode
+ * .vue's own per-directory `sortedEntries()`), so a parent directory always
+ * sorts immediately before its own children, and siblings sort the same way
+ * they would within any single expanded directory.
+ */
+function compareTreePaths(a: string, b: string): number {
+  const partsA = a.split('/').filter(Boolean);
+  const partsB = b.split('/').filter(Boolean);
+
+  for (let i = 0; i < Math.min(partsA.length, partsB.length); i++) {
+    const cmp = partsA[i].localeCompare(partsB[i]);
+
+    if (cmp !== 0) return cmp;
+  }
+
+  return partsA.length - partsB.length;
+}
+
+/**
+ * Search an already-mounted container rootfs for entries whose basename
+ * contains `query` (case-insensitive substring, not a glob/regex).  A single
+ * VM round trip, unlike listDirectoryAt()'s count-then-list pattern -- an
+ * exact total for a truncated whole-filesystem search would mean walking the
+ * entire tree twice, too costly for an operation that's already
+ * filesystem-wide. Behaves identically for a real mount and a runtime-fs
+ * (/proc/<pid>/root) root: there's no symlink-escape/rejoin logic here (this
+ * only reports what matched, not how to safely read it -- that's handled by
+ * resolveRegularFileAt() when a match is later opened), so isRuntimeFsRoot()
+ * branching isn't needed.
+ */
+export async function searchFilesAt(
+  vm: VMExecutor,
+  mountRoot: string,
+  query: string,
+  options?: { maxMatches?: number },
+): Promise<ContainerSearchResult> {
+  const trimmed = query.trim();
+
+  if (!trimmed) {
+    return {
+      query, matches: [], truncated: false, totalMatchCount: 0,
+    };
+  }
+
+  const maxMatches = options?.maxMatches ?? DEFAULT_MAX_MATCHES;
+  const script = `
+cd "$1" || exit 3
+lowerQuery=$(printf '%s' "$3" | tr 'A-Z' 'a-z')
+find . -mindepth 1 2>/dev/null | while IFS= read -r raw; do
+  name="\${raw##*/}"
+  lowerName=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
+  case "$lowerName" in
+    *"$lowerQuery"*)
+      if [ -L "$raw" ]; then kind=symlink
+      elif [ -d "$raw" ]; then kind=directory
+      elif [ -f "$raw" ]; then kind=file
+      else kind=other
+      fi
+      printf '%s\\t%s\\n' "\${raw#./}" "$kind"
+      ;;
+  esac
+done | head -n "$2"
+`;
+  const raw = await execCommandWithRetries(
+    vm, { capture: true, root: true }, '/bin/sh', '-c', script, '_', mountRoot, String(maxMatches + 1), trimmed,
+  );
+
+  const lines = raw.split('\n').filter(Boolean);
+  const truncated = lines.length > maxMatches;
+  const parsed: ContainerSearchMatch[] = lines.map((line) => {
+    const [relPath, kind] = line.split('\t');
+
+    return { path: `/${ relPath }`, kind: kind as ContainerFileKind };
+  });
+
+  // Sorted before truncating -- `find`'s traversal order is otherwise
+  // arbitrary, and stepping through results in tree order (rather than
+  // jumping around) is the whole point of returning an ordered list here.
+  parsed.sort((a, b) => compareTreePaths(a.path, b.path));
+  const matches = truncated ? parsed.slice(0, maxMatches) : parsed;
+
+  return {
+    query, matches, truncated, totalMatchCount: truncated ? null : matches.length,
+  };
 }

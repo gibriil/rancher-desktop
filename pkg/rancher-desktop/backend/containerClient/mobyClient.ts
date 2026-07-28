@@ -14,11 +14,13 @@ import {
 } from './types';
 
 import { VMExecutor } from '@pkg/backend/backend';
-import { listDirectoryAt, statPathAt, readFilePreviewAt, downloadFileAt } from '@pkg/backend/containerClient/containerFsOps';
+import {
+  listDirectoryAt, statPathAt, readFilePreviewAt, downloadFileAt, searchFilesAt,
+} from '@pkg/backend/containerClient/containerFsOps';
 import { parseDiffOutput, parseMountsOutput } from '@pkg/backend/containerClient/dockerFormatParsers';
 import {
   ContainerDiffEntry, ContainerDirectoryListing, ContainerFilePreview, ContainerFilesCapabilities,
-  ContainerFileStat, ContainerMountInfo,
+  ContainerFileStat, ContainerMountInfo, ContainerSearchResult,
 } from '@pkg/backend/containerClient/fileTypes';
 import dockerRegistry from '@pkg/backend/containerClient/registry';
 import { isRuntimeFsRoot, resolveRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
@@ -576,6 +578,18 @@ export class MobyClient implements ContainerEngineClient {
 
     try {
       return await readFilePreviewAt(this.vm, mountRoot, filePath);
+    } catch (ex) {
+      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
+    } finally {
+      await runCleanups(cleanups);
+    }
+  }
+
+  async searchContainerFiles(containerId: string, query: string): Promise<ContainerSearchResult> {
+    const [mountRoot, cleanups] = await this.mountContainer(containerId);
+
+    try {
+      return await searchFilesAt(this.vm, mountRoot, query);
     } catch (ex) {
       throw this.remapRuntimeFsError(mountRoot, containerId, ex);
     } finally {

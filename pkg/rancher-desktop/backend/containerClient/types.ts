@@ -2,7 +2,7 @@ import type { Log } from '@pkg/utils/logging';
 
 import type {
   ContainerDiffEntry, ContainerDirectoryListing, ContainerFilePreview,
-  ContainerFileStat, ContainerFilesCapabilities, ContainerMountInfo,
+  ContainerFileStat, ContainerFilesCapabilities, ContainerMountInfo, ContainerSearchResult,
 } from './fileTypes';
 import type { ChildProcessByStdio, SpawnOptions } from 'child_process';
 import type { Readable, Writable } from 'stream';
@@ -169,6 +169,15 @@ export interface ContainerEngineClient {
    * @param destinationPath The destination file path, on the host.
    */
   downloadContainerFile(containerId: string, filePath: string, destinationPath: string, options?: ContainerBasicOptions): Promise<void>;
+
+  /**
+   * Search a container's live filesystem for entries whose name contains
+   * `query` (case-insensitive substring), without exec-ing into the
+   * container.
+   * @param containerId The container to search.
+   * @param query The substring to search for.
+   */
+  searchContainerFiles(containerId: string, query: string, options?: ContainerBasicOptions): Promise<ContainerSearchResult>;
 
   /**
    * Determine whether this container's filesystem can currently be browsed,

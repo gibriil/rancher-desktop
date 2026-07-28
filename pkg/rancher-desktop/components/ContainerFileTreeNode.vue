@@ -19,19 +19,20 @@
 
     <template v-else-if="node && node.entries">
       <div
-        v-if="node.entries.length === 0"
+        v-if="node.entries.length === 0 && !context.filterTerm"
         class="tree-empty"
       >
         {{ context.t('containerFiles.noFiles') }}
       </div>
 
       <template
-        v-for="entry in sortedEntries"
+        v-for="entry in filteredEntries"
         :key="entry.path"
       >
         <div
           class="tree-row"
-          :class="{ 'is-inert': isInert(entry) }"
+          :class="{ 'is-inert': isInert(entry), 'is-search-current': context.highlightedMatchPath === entry.path }"
+          :data-tree-row-path="entry.path"
         >
           <div
             class="tree-primary"
@@ -64,7 +65,13 @@
               <span
                 class="tree-name"
                 :class="{ 'is-directory': entry.kind === 'directory', 'is-symlink': entry.kind === 'symlink' }"
-              >{{ entry.name }}</span>
+              >
+                <span
+                  v-for="(segment, i) in context.highlightSegments(entry.name, context.filterTerm)"
+                  :key="i"
+                  :class="{ 'is-match': segment.matched }"
+                >{{ segment.text }}</span>
+              </span>
               <span
                 v-if="entry.kind === 'symlink' && entry.symlinkTarget"
                 class="symlink-target"
@@ -161,6 +168,22 @@ export default defineComponent({
 
       return [...this.node.entries].sort((a, b) => a.name.localeCompare(b.name));
     },
+    /**
+     * Rows actually shown at this level: everything, unless a local filter
+     * term is active, in which case only entries whose own name matches, or
+     * directories whose already-loaded subtree contains a match somewhere
+     * (context.subtreeHasMatch) -- a directory never opened isn't searched.
+     */
+    filteredEntries(): ContainerDirectoryEntry[] {
+      const term = this.context.filterTerm;
+
+      if (!term) {
+        return this.sortedEntries;
+      }
+
+      return this.sortedEntries.filter(entry => entry.name.toLowerCase().includes(term) ||
+        (entry.kind === 'directory' && this.context.subtreeHasMatch(entry.path, term)));
+    },
   },
   methods: {
     isExpanded(path: string): boolean {
@@ -174,8 +197,8 @@ export default defineComponent({
     isInert(entry: ContainerDirectoryEntry): boolean {
       return entry.kind === 'symlink' && entry.symlinkEscapesRoot;
     },
-    rowTitle(entry: ContainerDirectoryEntry): string | null {
-      return this.isInert(entry) ? this.context.t('containerFiles.symlinkEscapesRoot') : null;
+    rowTitle(entry: ContainerDirectoryEntry): string | undefined {
+      return this.isInert(entry) ? this.context.t('containerFiles.symlinkEscapesRoot') : undefined;
     },
     decorated(entry: ContainerDirectoryEntry) {
       return this.context.decorate(entry);
@@ -222,6 +245,16 @@ export default defineComponent({
 
   &.is-inert {
     opacity: 0.6;
+  }
+
+  // The row a full-search reveal walk just scrolled to and highlighted --
+  // distinct from .is-match below (the instant local filter's inline
+  // substring highlight), since the two mechanisms answer different
+  // questions ("where did my search land" vs. "what matched my filter").
+  &.is-search-current {
+    background: var(--nav-bg);
+    outline: 1px solid var(--primary);
+    outline-offset: -1px;
   }
 }
 
@@ -284,6 +317,16 @@ export default defineComponent({
 
   &.is-symlink {
     font-style: italic;
+  }
+
+  // --logs-highlight(-bg) are existing theme tokens (both themes) evidently
+  // intended for exactly this "highlight a search match" purpose, though not
+  // otherwise consumed anywhere yet -- reusing them here rather than
+  // inventing a new one-off color.
+  .is-match {
+    background: var(--logs-highlight-bg);
+    color: var(--logs-highlight);
+    border-radius: 2px;
   }
 }
 

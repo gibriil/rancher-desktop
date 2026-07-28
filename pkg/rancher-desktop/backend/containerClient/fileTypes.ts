@@ -96,3 +96,28 @@ export interface ContainerFilesCapabilities {
   supported: boolean;
   reason:    string | null;
 }
+
+/**
+ * A single full-filesystem search hit.  Deliberately lighter than
+ * ContainerDirectoryEntry -- no stat/symlink data -- since revealing a match
+ * in the tree re-fetches its containing directory via listContainerDirectory()
+ * anyway, which already produces a full entry for it.
+ */
+export interface ContainerSearchMatch {
+  path: string;
+  kind: ContainerFileKind;
+}
+
+/** The result of a whole-filesystem search. */
+export interface ContainerSearchResult {
+  query:           string;
+  matches:         ContainerSearchMatch[];
+  /** True when matches were capped; see totalMatchCount for the real count. */
+  truncated:       boolean;
+  /**
+   * Exact count when not truncated; null when truncated -- getting an exact
+   * total would mean walking the whole filesystem twice, not worth doubling
+   * the cost of an already filesystem-wide operation.
+   */
+  totalMatchCount: number | null;
+}

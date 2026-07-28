@@ -7,7 +7,7 @@ import semver from 'semver';
 
 import type {
   ContainerDiffEntry, ContainerDirectoryListing, ContainerFilePreview, ContainerFilesCapabilities,
-  ContainerFileStat, ContainerMountInfo,
+  ContainerFileStat, ContainerMountInfo, ContainerSearchResult,
 } from '@pkg/backend/containerClient/fileTypes';
 import type { ServiceEntry } from '@pkg/backend/k8s';
 import { SnapshotDialog, SnapshotEvent } from '@pkg/main/snapshots/types';
@@ -62,6 +62,7 @@ export interface IpcMainEvents {
   'container-files/list':     (requestId: string, containerId: string, dirPath: string) => void;
   'container-files/stat':     (requestId: string, containerId: string, filePath: string) => void;
   'container-files/preview':  (requestId: string, containerId: string, filePath: string) => void;
+  'container-files/search':   (requestId: string, containerId: string, query: string) => void;
   'container-files/download': (containerId: string, filePath: string) => void;
   /** Which paths differ from the container's image (for "modified" badges). */
   'container-files/diff':     (containerId: string) => void;
@@ -263,6 +264,8 @@ export interface IpcRendererEvents {
   'container-files/stat-error':         (requestId: string, containerId: string, message: string) => void;
   'container-files/preview-result':     (requestId: string, containerId: string, result: ContainerFilePreview) => void;
   'container-files/preview-error':      (requestId: string, containerId: string, message: string) => void;
+  'container-files/search-result':      (requestId: string, containerId: string, result: ContainerSearchResult) => void;
+  'container-files/search-error':       (requestId: string, containerId: string, message: string) => void;
   'container-files/capabilities':       (containerId: string, result: ContainerFilesCapabilities) => void;
   'container-files/diff-result':        (containerId: string, entries: ContainerDiffEntry[]) => void;
   'container-files/diff-error':         (containerId: string, message: string) => void;

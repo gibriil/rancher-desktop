@@ -22,6 +22,7 @@ import {
   ContainerMountInfo,
   ContainerRunClientOptions,
   ContainerRunOptions,
+  ContainerSearchResult,
   ContainerStopOptions,
   ReadableProcess,
   WritableReadableProcess,
@@ -289,6 +290,10 @@ class MockContainerEngineClient implements ContainerEngineClient {
   }
 
   readContainerFilePreview(containerId: string, filePath: string, options?: ContainerBasicOptions): Promise<ContainerFilePreview> {
+    throw new Error('Method not implemented.');
+  }
+
+  searchContainerFiles(containerId: string, query: string, options?: ContainerBasicOptions): Promise<ContainerSearchResult> {
     throw new Error('Method not implemented.');
   }
 

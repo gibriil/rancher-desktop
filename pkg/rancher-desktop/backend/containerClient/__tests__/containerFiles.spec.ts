@@ -3,7 +3,7 @@
 import { jest } from '@jest/globals';
 
 import type { VMExecutor } from '@pkg/backend/backend';
-import { listDirectoryAt, statPathAt } from '@pkg/backend/containerClient/containerFsOps';
+import { listDirectoryAt, searchFilesAt, statPathAt } from '@pkg/backend/containerClient/containerFsOps';
 import { parseDiffOutput, parseMountsOutput } from '@pkg/backend/containerClient/dockerFormatParsers';
 
 describe('parseDiffOutput', () => {
@@ -172,5 +172,82 @@ describe('statPathAt', () => {
     } as unknown as VMExecutor;
 
     await expect(statPathAt(vm, MOUNT_ROOT, '/missing')).rejects.toThrow('Path not found: /missing');
+  });
+});
+
+/** Build a mocked VMExecutor whose single-round-trip execCommand always returns `output`. */
+function mockSearchVM(output: string): VMExecutor {
+  return {
+    backend:     'lima',
+    execCommand: jest.fn(() => Promise.resolve(output)),
+  } as unknown as VMExecutor;
+}
+
+describe('searchFilesAt', () => {
+  it('matches case-insensitively on basename and classifies kind', async() => {
+    // Deliberately scrambled input order -- proves the result is sorted,
+    // not just passed through in whatever order `find` happened to return.
+    const output = [
+      'usr/local/config\tdirectory',
+      'etc/sub/config-link\tsymlink',
+      'etc/config.yaml\tfile',
+    ].join('\n');
+    const vm = mockSearchVM(output);
+    const result = await searchFilesAt(vm, MOUNT_ROOT, 'CONFIG');
+
+    expect(result.query).toBe('CONFIG');
+    expect(result.truncated).toBe(false);
+    expect(result.totalMatchCount).toBe(3);
+    expect(result.matches).toEqual([
+      { path: '/etc/config.yaml', kind: 'file' },
+      { path: '/etc/sub/config-link', kind: 'symlink' },
+      { path: '/usr/local/config', kind: 'directory' },
+    ]);
+  });
+
+  it('orders a directory immediately before its own matched children, and distinguishes it from an unrelated same-prefix sibling', async() => {
+    const output = [
+      'src/utils/helpers.ts\tfile',
+      'src\tdirectory',
+      'srcbackup\tdirectory',
+    ].join('\n');
+    const vm = mockSearchVM(output);
+    const result = await searchFilesAt(vm, MOUNT_ROOT, 'src');
+
+    expect(result.matches.map(m => m.path)).toEqual(['/src', '/src/utils/helpers.ts', '/srcbackup']);
+  });
+
+  it('does not call execCommand for an empty or whitespace-only query', async() => {
+    const vm = mockSearchVM('should not be used');
+    const result = await searchFilesAt(vm, MOUNT_ROOT, '   ');
+
+    expect(result).toEqual({
+      query: '   ', matches: [], truncated: false, totalMatchCount: 0,
+    });
+    expect((vm.execCommand as jest.Mock)).not.toHaveBeenCalled();
+  });
+
+  it('reports truncation without an exact total when matches exceed the cap, keeping the first matches in tree order', async() => {
+    // maxMatches: 2 -> the script is asked to cap at 3 lines; 3 lines back means "more exist".
+    // Sorted before truncating, so the alphabetically-last entry ("c/three") is the one dropped,
+    // regardless of what order `find` returned them in.
+    const output = ['c/three\tfile', 'a/one\tfile', 'b/two\tfile'].join('\n');
+    const vm = mockSearchVM(output);
+    const result = await searchFilesAt(vm, MOUNT_ROOT, 'e', { maxMatches: 2 });
+
+    expect(result.truncated).toBe(true);
+    expect(result.totalMatchCount).toBeNull();
+    expect(result.matches).toEqual([
+      { path: '/a/one', kind: 'file' },
+      { path: '/b/two', kind: 'file' },
+    ]);
+  });
+
+  it('behaves identically against a runtime-fs (/proc/<pid>/root) mount root', async() => {
+    const output = 'proc-visible/file.txt\tfile';
+    const vm = mockSearchVM(output);
+    const result = await searchFilesAt(vm, '/proc/4242/root', 'file');
+
+    expect(result.matches).toEqual([{ path: '/proc-visible/file.txt', kind: 'file' }]);
   });
 });

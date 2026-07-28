@@ -40,11 +40,17 @@ const ipcMainProxy = getIpcMainProxy(console);
  */
 const OPERATION_TIMEOUT_MS = 20_000;
 
-function withTimeout<T>(promise: Promise<T>, description: string): Promise<T> {
+/**
+ * A whole-filesystem search can legitimately take longer than the ceiling
+ * that's appropriate for a single directory listing.
+ */
+const SEARCH_TIMEOUT_MS = 60_000;
+
+function withTimeout<T>(promise: Promise<T>, description: string, timeoutMs = OPERATION_TIMEOUT_MS): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`${ description } timed out after ${ OPERATION_TIMEOUT_MS / 1000 }s`)),
-      OPERATION_TIMEOUT_MS,
+      () => reject(new Error(`${ description } timed out after ${ timeoutMs / 1000 }s`)),
+      timeoutMs,
     );
 
     promise.then(
@@ -188,6 +194,24 @@ export class ContainerFilesHandler {
       } catch (ex) {
         console.error(`Failed to read ${ filePath } in ${ containerId }:`, ex);
         sendToFrame('container-files/preview-error', requestId, containerId, errorMessage(ex));
+      }
+    });
+
+    ipcMainProxy.on('container-files/search', async(event, requestId, containerId, query) => {
+      const sendToFrame = makeSendToFrame(event.sender, console);
+      const namespace = this.sessions.get(containerId)?.namespace;
+
+      try {
+        const result = await withTimeout(
+          this.client.searchContainerFiles(containerId, query, { namespace }),
+          `Searching ${ containerId } for "${ query }"`,
+          SEARCH_TIMEOUT_MS,
+        );
+
+        sendToFrame('container-files/search-result', requestId, containerId, result);
+      } catch (ex) {
+        console.error(`Failed to search ${ containerId } for "${ query }":`, ex);
+        sendToFrame('container-files/search-error', requestId, containerId, errorMessage(ex));
       }
     });
 

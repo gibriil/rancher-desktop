@@ -26,7 +26,49 @@
         >
           <i :class="anyLoading ? 'icon icon-spinner icon-spin' : 'icon icon-refresh'" />
         </button>
+        <container-file-search
+          v-model="searchInput"
+          :status="fullSearchStatus"
+          :match-count="fullSearchMatches.length"
+          :revealed-count="revealedMatchCount"
+          :current-index="fullSearchCurrentIndex"
+          @search="runFullSearch"
+          @next="searchNext"
+          @previous="searchPrevious"
+        />
       </div>
+
+      <banner
+        v-if="noLocalMatches"
+        color="info"
+        data-testid="files-no-local-matches"
+      >
+        {{ t('containerFiles.search.noLocalMatches', { query: filterQuery.trim() }) }}
+      </banner>
+
+      <banner
+        v-if="fullSearchStatus === 'error' && fullSearchError"
+        color="error"
+        data-testid="files-search-error"
+      >
+        {{ fullSearchError }}
+      </banner>
+
+      <banner
+        v-if="fullSearchStatus === 'done' && fullSearchMatches.length === 0"
+        color="info"
+        data-testid="files-search-no-results"
+      >
+        {{ t('containerFiles.search.noResults', { query: searchInput.trim() }) }}
+      </banner>
+
+      <banner
+        v-if="fullSearchTruncated"
+        color="warning"
+        data-testid="files-search-truncated"
+      >
+        {{ t('containerFiles.search.truncated', { shown: fullSearchMatches.length }) }}
+      </banner>
 
       <div class="file-panel">
         <div class="tree-header">
@@ -127,11 +169,14 @@
 
 <script lang="ts">
 import { BadgeState, Banner } from '@rancher/components';
+import debounce from 'lodash/debounce';
 import { defineComponent } from 'vue';
 
 import type {
   ContainerDiffEntry, ContainerDirectoryEntry, ContainerFilePreview, ContainerFilesCapabilities, ContainerMountInfo,
+  ContainerSearchMatch, ContainerSearchResult,
 } from '@pkg/backend/containerClient/fileTypes';
+import ContainerFileSearch from '@pkg/components/ContainerFileSearch.vue';
 import ContainerFileTreeNode from '@pkg/components/ContainerFileTreeNode.vue';
 import LoadingIndicator from '@pkg/components/LoadingIndicator.vue';
 import { ipcRenderer } from '@pkg/utils/ipcRenderer';
@@ -169,18 +214,103 @@ function freshNode(expanded: boolean): TreeNode {
   };
 }
 
+/**
+ * The directories that must be expanded/loaded to reveal `filePath` in the
+ * tree -- every ancestor from the root down to (but not including) the
+ * match's own parent-most containing directory.  The match itself is a row
+ * rendered by its parent's listing, so it's never loaded/expanded on its own.
+ */
+function ancestorPathsOf(filePath: string): string[] {
+  const parts = filePath.split('/').filter(Boolean);
+
+  parts.pop();
+  const paths = ['/'];
+  let cur = '';
+
+  for (const part of parts) {
+    cur += `/${ part }`;
+    paths.push(cur);
+  }
+
+  return paths;
+}
+
+/**
+ * Split `name` into segments for highlighting a case-insensitive substring
+ * match -- rendered as separate <span>s rather than v-html, since a
+ * container's filenames are untrusted-ish data.
+ */
+function highlightSegments(name: string, term: string): { text: string, matched: boolean }[] {
+  if (!term) {
+    return [{ text: name, matched: false }];
+  }
+
+  const lower = name.toLowerCase();
+  const segments: { text: string, matched: boolean }[] = [];
+  let i = 0;
+  let idx = lower.indexOf(term, i);
+
+  while (idx !== -1) {
+    if (idx > i) {
+      segments.push({ text: name.slice(i, idx), matched: false });
+    }
+    segments.push({ text: name.slice(idx, idx + term.length), matched: true });
+    i = idx + term.length;
+    idx = lower.indexOf(term, i);
+  }
+  if (i < name.length) {
+    segments.push({ text: name.slice(i), matched: false });
+  }
+
+  return segments;
+}
+
+interface ListWaiter {
+  resolve: (node: TreeNode) => void;
+  reject:  (err: Error) => void;
+}
+
 interface Data {
-  capabilities:        ContainerFilesCapabilities | null;
-  nodes:               Record<string, TreeNode>;
-  pendingListRequests: Record<string, string>; // requestId -> path
-  diffEntries:         ContainerDiffEntry[];
-  mountedPaths:        ContainerMountInfo[];
-  selectedPath:        string | null;
-  preview:             ContainerFilePreview | null;
-  previewLoading:      boolean;
-  previewError:        string | null;
-  downloadMessage:     string | null;
-  previewRequestId:    string | null;
+  capabilities:              ContainerFilesCapabilities | null;
+  nodes:                     Record<string, TreeNode>;
+  pendingListRequests:       Record<string, string>; // requestId -> path
+  pendingListPromises:       Record<string, ListWaiter[]>; // requestId -> waiters for ensureDirLoaded()
+  diffEntries:               ContainerDiffEntry[];
+  mountedPaths:              ContainerMountInfo[];
+  selectedPath:              string | null;
+  preview:                   ContainerFilePreview | null;
+  previewLoading:            boolean;
+  previewError:              string | null;
+  downloadMessage:           string | null;
+  previewRequestId:          string | null;
+  // Instant local filter (over whatever's already loaded/expanded).
+  searchInput:               string; // raw, updated every keystroke
+  filterQuery:               string; // debounced copy that actually drives filtering
+  debouncedSetFilterQuery:   ((value: string) => void) | null;
+  // On-demand full-filesystem search.
+  fullSearchStatus:          'idle' | 'searching' | 'done' | 'error';
+  fullSearchMatches:         ContainerSearchMatch[];
+  fullSearchTruncated:       boolean;
+  fullSearchTotalMatchCount: number | null;
+  fullSearchRequestId:       string | null;
+  fullSearchCurrentIndex:    number;
+  fullSearchError:           string | null;
+  highlightedMatchPath:      string | null;
+  // Indices into fullSearchMatches whose ancestors have finished being
+  // revealed (successfully or not) -- a Set, not a raw counter, so
+  // re-revealing an already-revealed match (e.g. navigating back to it)
+  // can't double-count it.
+  revealedMatchIndices:      Set<number>;
+  // Invalidates every in-flight ancestor-expand-and-reveal walk from the
+  // current search batch (e.g. a newer search superseding it, or a
+  // container reset) without needing to cancel the underlying promises
+  // they're awaiting -- shared across all matches' walks, unlike
+  // navigationSequence below.
+  expandWalkGeneration:      number;
+  // Invalidates only a specific in-flight jumpToMatch() call (e.g. rapid
+  // next/previous clicks), independent of the broader reveal-all-matches
+  // batch tracked by expandWalkGeneration.
+  navigationSequence:        number;
 }
 
 export default defineComponent({
@@ -188,6 +318,7 @@ export default defineComponent({
   components: {
     BadgeState,
     Banner,
+    ContainerFileSearch,
     ContainerFileTreeNode,
     LoadingIndicator,
   },
@@ -214,6 +345,7 @@ export default defineComponent({
       capabilities:        null,
       nodes:               { '/': freshNode(true) },
       pendingListRequests: {},
+      pendingListPromises: {},
       diffEntries:         [],
       mountedPaths:        [],
       selectedPath:        null,
@@ -222,7 +354,28 @@ export default defineComponent({
       previewError:        null,
       downloadMessage:     null,
       previewRequestId:    null,
+
+      searchInput:              '',
+      filterQuery:              '',
+      debouncedSetFilterQuery:  null,
+
+      fullSearchStatus:          'idle',
+      fullSearchMatches:         [],
+      fullSearchTruncated:       false,
+      fullSearchTotalMatchCount: null,
+      fullSearchRequestId:       null,
+      fullSearchCurrentIndex:    0,
+      fullSearchError:           null,
+      highlightedMatchPath:      null,
+      revealedMatchIndices:      new Set(),
+      expandWalkGeneration:      0,
+      navigationSequence:        0,
     };
+  },
+  created() {
+    this.debouncedSetFilterQuery = debounce((value: string) => {
+      this.filterQuery = value;
+    }, 200);
   },
   computed: {
     rootNode(): TreeNode {
@@ -249,6 +402,17 @@ export default defineComponent({
 
       return map;
     },
+    /** Lowercased once here rather than by every recursive tree node. */
+    filterTerm(): string {
+      return this.filterQuery.trim().toLowerCase();
+    },
+    /** True once a local filter is active and nothing loaded/expanded matches it anywhere. */
+    noLocalMatches(): boolean {
+      return this.filterTerm !== '' && !this.subtreeHasMatch('/', this.filterTerm);
+    },
+    revealedMatchCount(): number {
+      return this.revealedMatchIndices.size;
+    },
     /**
      * Bundled once and passed by reference to every level of the recursive
      * tree, rather than threading half a dozen individual props through
@@ -258,25 +422,40 @@ export default defineComponent({
      */
     treeContext() {
       return {
-        nodes:          this.nodes,
-        decorate:       this.decorate,
-        onToggleDir:    this.toggleDir,
-        onSelectFile:   this.selectFile,
-        formatSize:     this.formatSize,
-        formatDate:     this.formatDate,
-        getFileIcon:    this.getFileIcon,
-        diffBadgeColor: this.diffBadgeColor,
+        nodes:                this.nodes,
+        decorate:             this.decorate,
+        onToggleDir:          this.toggleDir,
+        onSelectFile:         this.selectFile,
+        formatSize:           this.formatSize,
+        formatDate:           this.formatDate,
+        getFileIcon:          this.getFileIcon,
+        diffBadgeColor:       this.diffBadgeColor,
+        filterTerm:           this.filterTerm,
+        subtreeHasMatch:      this.subtreeHasMatch,
+        highlightSegments,
+        highlightedMatchPath: this.highlightedMatchPath,
         // `t` is a global property (installed by the i18n plugin), not a
         // component method, so Vue doesn't auto-bind it to `this` the way
         // it does everything else above -- wrap it or lose `this.$store`
         // once it's called as `context.t(...)` instead of `this.t(...)`.
-        t:              (key: string, args?: Record<string, unknown>) => this.t(key, args),
+        t:                    (key: string, args?: Record<string, unknown>) => this.t(key, args),
       };
     },
   },
   watch: {
     containerId() {
       this.resetAndOpen();
+    },
+    searchInput(neu: string) {
+      // Clearing the box -- whether by backspacing or the search input's own
+      // native "x" -- resets everything immediately, not just the (debounced)
+      // local filter; otherwise a stale full-search banner/highlight could
+      // outlive the query that produced it.
+      if (neu === '') {
+        this.clearSearch();
+      } else {
+        this.debouncedSetFilterQuery?.(neu);
+      }
     },
   },
   mounted() {
@@ -285,6 +464,8 @@ export default defineComponent({
     ipcRenderer.on('container-files/list-error', this.onListError);
     ipcRenderer.on('container-files/preview-result', this.onPreviewResult);
     ipcRenderer.on('container-files/preview-error', this.onPreviewError);
+    ipcRenderer.on('container-files/search-result', this.onSearchResult);
+    ipcRenderer.on('container-files/search-error', this.onSearchError);
     ipcRenderer.on('container-files/diff-result', this.onDiffResult);
     ipcRenderer.on('container-files/diff-error', this.onDiffError);
     ipcRenderer.on('container-files/mounts-result', this.onMountsResult);
@@ -302,6 +483,8 @@ export default defineComponent({
     ipcRenderer.removeAllListeners('container-files/list-error');
     ipcRenderer.removeAllListeners('container-files/preview-result');
     ipcRenderer.removeAllListeners('container-files/preview-error');
+    ipcRenderer.removeAllListeners('container-files/search-result');
+    ipcRenderer.removeAllListeners('container-files/search-error');
     ipcRenderer.removeAllListeners('container-files/diff-result');
     ipcRenderer.removeAllListeners('container-files/diff-error');
     ipcRenderer.removeAllListeners('container-files/mounts-result');
@@ -315,10 +498,22 @@ export default defineComponent({
       ipcRenderer.send('container-files/close', this.containerId);
       this.capabilities = null;
       this.pendingListRequests = {};
+      // Any waiter still pending belonged to the tree that's about to be
+      // thrown away -- reject rather than leaving it to hang forever, since
+      // a stale response (if it ever arrives) will be dropped by
+      // onListResult/onListError's own containerId guard before it reaches
+      // the settling logic below.
+      for (const waiters of Object.values(this.pendingListPromises)) {
+        for (const waiter of waiters) {
+          waiter.reject(new Error('Container files session was reset'));
+        }
+      }
+      this.pendingListPromises = {};
       this.nodes = { '/': freshNode(true) };
       this.diffEntries = [];
       this.mountedPaths = [];
       this.closePreview();
+      this.clearSearch();
       this.openSession();
     },
     openSession() {
@@ -355,13 +550,21 @@ export default defineComponent({
       if (dirPath === undefined) return;
       delete this.pendingListRequests[requestId];
       const node = this.nodes[dirPath];
+      const waiters = this.pendingListPromises[requestId];
 
-      if (node?.requestId !== requestId) return;
+      delete this.pendingListPromises[requestId];
+
+      if (node?.requestId !== requestId) {
+        waiters?.forEach(waiter => waiter.reject(new Error(`Listing of ${ dirPath } was superseded by a newer request`)));
+
+        return;
+      }
       node.entries = result.entries;
       node.truncated = result.truncated;
       node.totalEntryCount = result.totalEntryCount;
       node.loading = false;
       node.error = null;
+      waiters?.forEach(waiter => waiter.resolve(node));
     },
     onListError(_event: unknown, requestId: string, containerId: string, message: string) {
       if (containerId !== this.containerId) return;
@@ -370,10 +573,18 @@ export default defineComponent({
       if (dirPath === undefined) return;
       delete this.pendingListRequests[requestId];
       const node = this.nodes[dirPath];
+      const waiters = this.pendingListPromises[requestId];
 
-      if (node?.requestId !== requestId) return;
+      delete this.pendingListPromises[requestId];
+
+      if (node?.requestId !== requestId) {
+        waiters?.forEach(waiter => waiter.reject(new Error(`Listing of ${ dirPath } was superseded by a newer request`)));
+
+        return;
+      }
       node.error = message;
       node.loading = false;
+      waiters?.forEach(waiter => waiter.reject(new Error(message)));
     },
     onDiffResult(_event: unknown, containerId: string, entries: ContainerDiffEntry[]) {
       if (containerId !== this.containerId) return;
@@ -413,6 +624,34 @@ export default defineComponent({
         this.requestList(dirPath);
       }
     },
+    /**
+     * Force-opens a directory node and resolves once its *current* load
+     * settles -- unlike toggleDir(), never collapses an already-expanded
+     * node, and returns a Promise so a caller (the search-reveal walk below)
+     * can await it. Piggy-backs on an already-in-flight request for the same
+     * node rather than firing a duplicate.
+     */
+    ensureDirLoaded(dirPath: string): Promise<TreeNode> {
+      let node = this.nodes[dirPath];
+
+      if (!node) {
+        node = freshNode(false);
+        this.nodes[dirPath] = node;
+      }
+      node.expanded = true;
+
+      if (node.entries !== null && !node.loading) {
+        return Promise.resolve(node);
+      }
+      if (!node.loading) {
+        this.requestList(dirPath);
+      }
+      const requestId = node.requestId!;
+
+      return new Promise((resolve, reject) => {
+        (this.pendingListPromises[requestId] ??= []).push({ resolve, reject });
+      });
+    },
     /** Re-fetches diff/mounts, plus every node that's currently expanded (not just the root), preserving expand state. */
     refresh() {
       ipcRenderer.send('container-files/diff', this.containerId);
@@ -424,9 +663,15 @@ export default defineComponent({
       }
     },
     decorate(entry: ContainerDirectoryEntry) {
+      const mountInfo = this.mountsByPath[entry.path] ?? null;
+
       return {
-        diffStatus: this.diffByPath[entry.path] ?? null,
-        mountInfo:  this.mountsByPath[entry.path] ?? null,
+        // A mount point's merged view always differs from the image's own
+        // layers, so `diff` reports it as added/changed alongside "Mounted"
+        // -- but that's not meaningful to show the user (Docker Desktop
+        // shows only "Mounted" for a mount point too), so suppress it here.
+        diffStatus: mountInfo ? null : (this.diffByPath[entry.path] ?? null),
+        mountInfo,
       };
     },
     selectFile(entry: ContainerDirectoryEntry) {
@@ -493,6 +738,163 @@ export default defineComponent({
     },
     formatDate(mtime: string | null): string {
       return mtime ? new Date(mtime).toLocaleString() : '?';
+    },
+    /**
+     * True if `dirPath` or anything in its already-loaded subtree matches
+     * `term` (case-insensitive substring on name). Recurses over any node
+     * with entries !== null regardless of its current `expanded` state, so
+     * collapsing a matched subdirectory doesn't hide its own row -- folders
+     * never opened aren't searched at all, by design.
+     */
+    subtreeHasMatch(dirPath: string, term: string): boolean {
+      const node = this.nodes[dirPath];
+
+      if (!node?.entries) return false;
+
+      return node.entries.some(entry => entry.name.toLowerCase().includes(term) ||
+        (entry.kind === 'directory' && this.subtreeHasMatch(entry.path, term)));
+    },
+    runFullSearch() {
+      const query = this.searchInput.trim();
+
+      if (!query) return;
+      // Invalidate any still-running reveal walk from a previous search
+      // immediately, even before this one's results arrive.
+      this.expandWalkGeneration++;
+      this.fullSearchStatus = 'searching';
+      this.fullSearchError = null;
+      this.fullSearchMatches = [];
+      this.fullSearchTruncated = false;
+      this.fullSearchTotalMatchCount = null;
+      this.fullSearchCurrentIndex = 0;
+      this.highlightedMatchPath = null;
+      this.revealedMatchIndices = new Set();
+      const requestId = generateRequestId();
+
+      this.fullSearchRequestId = requestId;
+      ipcRenderer.send('container-files/search', requestId, this.containerId, query);
+    },
+    onSearchResult(_event: unknown, requestId: string, containerId: string, result: ContainerSearchResult) {
+      if (containerId !== this.containerId || requestId !== this.fullSearchRequestId) return;
+      this.fullSearchStatus = 'done';
+      this.fullSearchMatches = result.matches;
+      this.fullSearchTruncated = result.truncated;
+      this.fullSearchTotalMatchCount = result.totalMatchCount;
+      this.fullSearchCurrentIndex = 0;
+      if (result.matches.length > 0) {
+        this.jumpToMatch(0);
+        this.revealRemainingMatches(result.matches);
+      }
+    },
+    onSearchError(_event: unknown, requestId: string, containerId: string, message: string) {
+      if (containerId !== this.containerId || requestId !== this.fullSearchRequestId) return;
+      this.fullSearchStatus = 'error';
+      this.fullSearchError = message;
+    },
+    searchNext() {
+      if (this.fullSearchMatches.length === 0) return;
+      this.jumpToMatch((this.fullSearchCurrentIndex + 1) % this.fullSearchMatches.length);
+    },
+    searchPrevious() {
+      if (this.fullSearchMatches.length === 0) return;
+      this.jumpToMatch((this.fullSearchCurrentIndex - 1 + this.fullSearchMatches.length) % this.fullSearchMatches.length);
+    },
+    /**
+     * Expands/loads every ancestor directory down to `path` (fetching any
+     * not yet loaded), without scrolling or highlighting anything -- the
+     * building block both jumpToMatch() and revealRemainingMatches() share.
+     * `generation` is a snapshot of expandWalkGeneration taken by the
+     * caller at the *batch's* start (a whole search, or a container reset)
+     * -- not bumped per-call -- so many of these can run concurrently for
+     * different matches from the same search without aborting each other;
+     * they only abort if a *newer* search/reset supersedes the batch.
+     * Returns false if superseded or if a fetch genuinely failed.
+     */
+    async revealPath(path: string, generation: number): Promise<boolean> {
+      try {
+        for (const dirPath of ancestorPathsOf(path)) {
+          await this.ensureDirLoaded(dirPath);
+          if (generation !== this.expandWalkGeneration) return false;
+        }
+
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    /**
+     * Reveals every match beyond index 0 (jumpToMatch(0) already reveals
+     * that one) in the background, so the whole result set becomes visible
+     * in the tree without clicking through each one individually. Matches
+     * stream in as each shared ancestor directory's listing resolves
+     * (ensureDirLoaded() dedupes concurrent requests for the same
+     * directory), rather than all appearing at once -- deliberately not
+     * awaited or surfaced as an error; a background reveal failing quietly
+     * for one match shouldn't affect the others.
+     */
+    revealRemainingMatches(matches: ContainerSearchMatch[]) {
+      const generation = this.expandWalkGeneration;
+
+      matches.forEach((match, index) => {
+        if (index === 0) return;
+        this.revealPath(match.path, generation).then(() => this.markRevealed(index, generation));
+      });
+    },
+    /** Records that fullSearchMatches[index]'s reveal has settled, unless a newer search/reset has since superseded `generation`. */
+    markRevealed(index: number, generation: number) {
+      if (generation !== this.expandWalkGeneration) return;
+      this.revealedMatchIndices.add(index);
+    },
+    /**
+     * Reveals fullSearchMatches[index] (see revealPath()), then scrolls to
+     * and highlights it as the current match. `navigationSequence` (bumped
+     * on every call, unlike the shared `generation` snapshot) lets a newer
+     * jump/next/previous supersede an in-flight one -- e.g. rapid double
+     * clicks -- without that also aborting the unrelated background reveal
+     * of other matches.
+     */
+    async jumpToMatch(index: number) {
+      const match = this.fullSearchMatches[index];
+
+      if (!match) return;
+      this.fullSearchCurrentIndex = index;
+      const generation = this.expandWalkGeneration;
+      const navigation = ++this.navigationSequence;
+      const revealed = await this.revealPath(match.path, generation);
+
+      this.markRevealed(index, generation);
+      if (generation !== this.expandWalkGeneration || navigation !== this.navigationSequence) return;
+      if (!revealed) {
+        this.fullSearchError = this.t('containerFiles.search.revealFailed', { path: match.path });
+
+        return;
+      }
+      await this.$nextTick();
+      if (generation !== this.expandWalkGeneration || navigation !== this.navigationSequence) return;
+      this.scrollToRow(match.path);
+    },
+    scrollToRow(path: string) {
+      const el = (this.$el as HTMLElement).querySelector(`[data-tree-row-path="${ CSS.escape(path) }"]`);
+
+      if (!el) return;
+      el.scrollIntoView({ block: 'center' });
+      this.highlightedMatchPath = path;
+    },
+    /** Resets both the instant local filter and the full-search state -- they share one text box. */
+    clearSearch() {
+      this.searchInput = '';
+      this.filterQuery = '';
+      this.expandWalkGeneration++;
+      this.navigationSequence++;
+      this.fullSearchStatus = 'idle';
+      this.fullSearchMatches = [];
+      this.fullSearchTruncated = false;
+      this.fullSearchTotalMatchCount = null;
+      this.fullSearchRequestId = null;
+      this.fullSearchCurrentIndex = 0;
+      this.fullSearchError = null;
+      this.highlightedMatchPath = null;
+      this.revealedMatchIndices = new Set();
     },
   },
 });

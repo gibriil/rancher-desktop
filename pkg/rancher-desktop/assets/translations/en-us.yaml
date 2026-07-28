@@ -898,6 +898,22 @@ containerFiles:
       size: Size
       modified: Modified
       permissions: Permissions
+  search:
+    ariaLabel: Search container files
+    placeholder: Filter files, or press Enter to search everything
+    searchAll: Search all files
+    # @context "{current} of {total}", e.g. "2 of 5", shown next to the search box while stepping through full-search results
+    resultCount: '{current} of {total}'
+    # @context "{revealed} of {total}", e.g. "12 of 37", shown while matches are still being located/expanded in the tree, before next/previous navigation is available
+    revealingCount: 'Loading {revealed} of {total}…'
+    previousMatch: Previous match
+    nextMatch: Next match
+    # @context Shown when the instant local filter matches nothing in the currently-loaded/expanded part of the tree; clarifies that this only checked what's already visible, not the whole container
+    noLocalMatches: 'No visible matches for "{query}" in the expanded folders. Press Enter, or click search, to check the rest of the filesystem.'
+    # @context Shown when a full-filesystem search (not just the local filter) finds nothing
+    noResults: 'No files found matching "{query}".'
+    truncated: 'Showing the first {shown} matches; refine your search for more precise results.'
+    revealFailed: 'Could not reveal the match at {path}.'
 containerInfo:
   fallbackTitle: Container Info
   info: Info
