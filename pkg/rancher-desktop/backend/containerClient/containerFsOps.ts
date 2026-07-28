@@ -11,6 +11,7 @@
  * of which engine produced it.
  */
 
+import fs from 'fs';
 import path from 'path';
 
 import { VMExecutor } from '@pkg/backend/backend';
@@ -18,6 +19,7 @@ import {
   ContainerDirectoryEntry, ContainerDirectoryListing, ContainerFileKind, ContainerFilePreview, ContainerFileStat,
 } from '@pkg/backend/containerClient/fileTypes';
 import { isRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
+import { execCommandWithRetries } from '@pkg/backend/containerClient/snapshotMount';
 
 const DEFAULT_MAX_ENTRIES = 2_000;
 const DEFAULT_MAX_PREVIEW_BYTES = 1_048_576; // 1 MiB
@@ -168,7 +170,7 @@ export async function listDirectoryAt(
   const absDir = toAbsolute(mountRoot, dirPath);
 
   const countScript = 'cd "$1" || exit 3; find . -mindepth 1 -maxdepth 1 | wc -l';
-  const totalRaw = await vm.execCommand({ capture: true, root: true }, '/bin/sh', '-c', countScript, '_', absDir);
+  const totalRaw = await execCommandWithRetries(vm, { capture: true, root: true }, '/bin/sh', '-c', countScript, '_', absDir);
   const totalEntryCount = Number(totalRaw.trim()) || 0;
 
   if (totalEntryCount === 0) {
@@ -185,8 +187,8 @@ find . -mindepth 1 -maxdepth 1 | head -n "$2" | while IFS= read -r raw; do
   printf 'NAME\\t%s\\n' "$name"
 done
 `;
-  const raw = await vm.execCommand(
-    { capture: true, root: true }, '/bin/sh', '-c', listScript, '_', absDir, String(maxEntries), mountRoot,
+  const raw = await execCommandWithRetries(
+    vm, { capture: true, root: true }, '/bin/sh', '-c', listScript, '_', absDir, String(maxEntries), mountRoot,
   );
 
   const entries: ContainerDirectoryEntry[] = [];
@@ -228,7 +230,7 @@ ${ STAT_BODY_SCRIPT }
   let raw: string;
 
   try {
-    raw = await vm.execCommand({ capture: true, root: true }, '/bin/sh', '-c', script, '_', dir, name, mountRoot);
+    raw = await execCommandWithRetries(vm, { capture: true, root: true }, '/bin/sh', '-c', script, '_', dir, name, mountRoot);
   } catch (ex) {
     throw new Error(`Path not found: ${ filePath }`, { cause: ex });
   }
@@ -274,12 +276,12 @@ export async function resolveRegularFileAt(
       const dir = path.posix.dirname(absPath);
       const name = path.posix.basename(absPath);
 
-      resolvedAbs = (await vm.execCommand(
-        { capture: true, root: true }, '/bin/sh', '-c', 'cd "$1" && readlink -f -- "$2"', '_', dir, name,
+      resolvedAbs = (await execCommandWithRetries(
+        vm, { capture: true, root: true }, '/bin/sh', '-c', 'cd "$1" && readlink -f -- "$2"', '_', dir, name,
       )).trim();
     } else {
-      resolvedAbs = (await vm.execCommand(
-        { capture: true, root: true }, '/bin/sh', '-c', 'readlink -f -- "$1"', '_', absPath,
+      resolvedAbs = (await execCommandWithRetries(
+        vm, { capture: true, root: true }, '/bin/sh', '-c', 'readlink -f -- "$1"', '_', absPath,
       )).trim();
     }
 
@@ -323,6 +325,35 @@ export async function resolveRegularFileAt(
 }
 
 /**
+ * Read a file's content as base64.
+ *
+ * For a runtime-fs root (see runtimeFsMount.ts), reads via a retried
+ * `execCommand` (root-privileged `base64`) rather than `vm.readFile()`.
+ * Two confirmed reasons, both verified against a real dev VM (2026-07-28):
+ * `vm.readFile()` is a separate, unretried code path -- on Lima it's a
+ * fresh, independent `limaSpawn()` invocation just as exposed to the same
+ * intermittent "execCommand returns empty output" flake `execCommandWithRetries`
+ * already works around elsewhere in this codebase (see snapshotMount.ts) --
+ * and on WSL it goes through the Windows-side `\\wsl$` 9P redirector, a
+ * genuinely different and slower-to-settle transport for a freshly-resolved
+ * magic-symlink path. Root privilege matters too: reading through
+ * `/proc/<pid>/root` requires root, which `execCommand({root: true})`
+ * already provides but `vm.readFile()` may not (see downloadFileAt()'s doc
+ * comment below for the confirmed case of `vm.copyFileOut()` lacking it
+ * entirely). For a real mount, `vm.readFile()` is unchanged -- already
+ * proven to work there.
+ */
+async function readFileContentBase64(vm: VMExecutor, mountRoot: string, absTarget: string): Promise<string> {
+  if (isRuntimeFsRoot(mountRoot)) {
+    return (await execCommandWithRetries(
+      vm, { capture: true, root: true }, '/bin/sh', '-c', 'base64 -- "$1"', '_', absTarget,
+    )).trim();
+  }
+
+  return (await vm.readFile(absTarget, { encoding: 'base64' })).trim();
+}
+
+/**
  * Read a size- and type-capped preview of a file's contents.  Symlinks are
  * transparently followed as long as they resolve inside the mount; a
  * symlink escaping the mount is refused rather than followed, since the
@@ -345,7 +376,7 @@ export async function readFilePreviewAt(
   }
 
   const absTarget = toAbsolute(mountRoot, targetPath);
-  const base64 = (await vm.readFile(absTarget, { encoding: 'base64' })).trim();
+  const base64 = await readFileContentBase64(vm, mountRoot, absTarget);
   const buf = Buffer.from(base64, 'base64');
   const isBinary = buf.includes(0);
 
@@ -360,9 +391,29 @@ export async function readFilePreviewAt(
   };
 }
 
-/** Copy a file out of an already-mounted container rootfs to a host path. */
+/**
+ * Copy a file out of an already-mounted container rootfs to a host path.
+ *
+ * For a runtime-fs root, `vm.copyFileOut()` cannot be used at all: on Lima
+ * it shells out to `limactl copy`, a plain rsync-over-SSH transfer that runs
+ * as the regular SSH user with no root elevation, and reading through
+ * `/proc/<pid>/root` requires root. Confirmed empirically against a real dev
+ * VM (2026-07-28): `limactl copy` fails outright with "Permission denied"
+ * for any procfs-rooted path, every time, not intermittently. Read the
+ * content via the VM's own root-privileged shell instead (the same helper
+ * `readFilePreviewAt` uses) and write it out here on the host side.
+ */
 export async function downloadFileAt(vm: VMExecutor, mountRoot: string, filePath: string, hostDestPath: string): Promise<void> {
   const { targetPath } = await resolveRegularFileAt(vm, mountRoot, filePath, 'download');
+  const absTarget = toAbsolute(mountRoot, targetPath);
 
-  await vm.copyFileOut(toAbsolute(mountRoot, targetPath), hostDestPath);
+  if (isRuntimeFsRoot(mountRoot)) {
+    const base64 = await readFileContentBase64(vm, mountRoot, absTarget);
+
+    await fs.promises.writeFile(hostDestPath, Buffer.from(base64, 'base64'));
+
+    return;
+  }
+
+  await vm.copyFileOut(absTarget, hostDestPath);
 }

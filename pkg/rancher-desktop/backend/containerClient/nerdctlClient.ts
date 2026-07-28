@@ -155,7 +155,17 @@ export class NerdctlClient implements ContainerEngineClient {
    */
   private remapRuntimeFsError(mountRoot: string, containerId: string, ex: unknown): unknown {
     if (isRuntimeFsRoot(mountRoot)) {
-      return new Error(`Container ${ containerId } appears to have stopped or restarted while browsing; refresh and try again.`, { cause: ex });
+      // Include the real cause inline rather than only attaching it via
+      // `.cause` (which never reaches the renderer -- see main/containerFiles.ts's
+      // errorMessage()). A container that's genuinely stopped/restarted
+      // mid-browse is one real cause, but not the only one; surfacing the
+      // actual message keeps this honest if it's something else entirely.
+      const reason = ex instanceof Error ? ex.message : String(ex);
+
+      return new Error(
+        `Container ${ containerId } appears to have stopped or restarted while browsing, or the request failed transiently (${ reason }); refresh and try again.`,
+        { cause: ex },
+      );
     }
 
     return ex;

@@ -28,27 +28,7 @@
         </button>
       </div>
 
-      <loading-indicator
-        v-if="rootNode.loading && !rootNode.entries"
-        class="content-state"
-      >
-        {{ t('containerFiles.loading') }}
-      </loading-indicator>
-
-      <banner
-        v-else-if="rootNode.error"
-        class="content-state"
-        color="error"
-        data-testid="files-error"
-      >
-        <span class="icon icon-info-circle icon-lg" />
-        {{ rootNode.error }}
-      </banner>
-
-      <div
-        v-else
-        class="file-panel"
-      >
+      <div class="file-panel">
         <div class="tree-header">
           <span class="tree-header-primary">{{ t('containerFiles.table.header.name') }}</span>
           <span class="tree-header-meta">
@@ -61,7 +41,25 @@
           class="file-tree"
           data-testid="file-tree"
         >
+          <loading-indicator
+            v-if="rootNode.loading && !rootNode.entries"
+            class="content-state"
+          >
+            {{ t('containerFiles.loading') }}
+          </loading-indicator>
+
+          <banner
+            v-else-if="rootNode.error"
+            class="content-state"
+            color="error"
+            data-testid="files-error"
+          >
+            <span class="icon icon-info-circle icon-lg" />
+            {{ rootNode.error }}
+          </banner>
+
           <container-file-tree-node
+            v-else
             path="/"
             :depth="0"
             :context="treeContext"
@@ -608,6 +606,8 @@ export default defineComponent({
 
 .file-tree {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
   scrollbar-gutter: stable;
   min-height: 0;

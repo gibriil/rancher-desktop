@@ -19,6 +19,7 @@
  */
 
 import { VMExecutor } from '@pkg/backend/backend';
+import { execCommandWithRetries } from '@pkg/backend/containerClient/snapshotMount';
 
 /**
  * Confirm that `/proc/<pid>/root` is usable as a live view of `containerId`'s
@@ -32,6 +33,15 @@ import { VMExecutor } from '@pkg/backend/backend';
  *
  * Never throws; returns null for any failure so callers can uniformly treat
  * "not usable right now" as "fall back to the snapshot/overlay mount".
+ *
+ * Uses execCommandWithRetries() -- but note the script below always prints
+ * "yes" or "no" rather than relying on a bare non-zero exit for the "no"
+ * case (unlike similar scripts elsewhere in this codebase): that retry
+ * helper's "empty output means the command flaked, try again" heuristic
+ * would otherwise misfire on the perfectly legitimate, silent "no" a
+ * stopped container produces every time -- burning up to 10 retries on
+ * what is by far the single most common result of this check, rather than
+ * only retrying on a genuine flake.
  */
 export async function resolveRuntimeFsRoot(vm: VMExecutor, pid: number, containerId: string): Promise<string | null> {
   if (!Number.isInteger(pid) || pid <= 0) {
@@ -40,14 +50,16 @@ export async function resolveRuntimeFsRoot(vm: VMExecutor, pid: number, containe
 
   const root = `/proc/${ pid }/root`;
   const script = `
-test -d "$1" || exit 1
-grep -q "$2" "/proc/$3/cgroup" 2>/dev/null || exit 1
-echo yes
+if [ -d "$1" ] && grep -q "$2" "/proc/$3/cgroup" 2>/dev/null; then
+  echo yes
+else
+  echo no
+fi
 `;
 
   try {
-    const result = await vm.execCommand(
-      { capture: true, root: true, expectFailure: true }, '/bin/sh', '-c', script, '_', root, containerId, String(pid),
+    const result = await execCommandWithRetries(
+      vm, { capture: true, root: true }, '/bin/sh', '-c', script, '_', root, containerId, String(pid),
     );
 
     return result.trim() === 'yes' ? root : null;
