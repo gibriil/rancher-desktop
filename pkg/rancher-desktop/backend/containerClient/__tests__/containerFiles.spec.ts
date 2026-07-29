@@ -250,4 +250,30 @@ describe('searchFilesAt', () => {
 
     expect(result.matches).toEqual([{ path: '/proc-visible/file.txt', kind: 'file' }]);
   });
+
+  it('prunes the top-level /proc, /sys, and /dev entries from the traversal', async() => {
+    // These are the OCI runtime's own live mounts into a *running* container's
+    // namespace (see runtimeFsMount.ts) -- kernel-virtual trees with thousands
+    // of synthetic entries, not real files, and not part of a stopped
+    // container's snapshot/overlay mount at all. Walking them is what made
+    // search visibly slower against a running container than a stopped one.
+    let capturedScript = '';
+    const vm = {
+      backend:     'lima',
+      execCommand: jest.fn((...args: any[]) => {
+        const command = typeof args[0] === 'object' ? args.slice(1) : args;
+
+        capturedScript = command[2] as string;
+
+        return Promise.resolve('');
+      }),
+    } as unknown as VMExecutor;
+
+    await searchFilesAt(vm, MOUNT_ROOT, 'anything');
+
+    expect(capturedScript).toContain('-prune');
+    expect(capturedScript).toContain('-path ./proc');
+    expect(capturedScript).toContain('-path ./sys');
+    expect(capturedScript).toContain('-path ./dev');
+  });
 });

@@ -446,11 +446,26 @@ function compareTreePaths(a: string, b: string): number {
  * VM round trip, unlike listDirectoryAt()'s count-then-list pattern -- an
  * exact total for a truncated whole-filesystem search would mean walking the
  * entire tree twice, too costly for an operation that's already
- * filesystem-wide. Behaves identically for a real mount and a runtime-fs
- * (/proc/<pid>/root) root: there's no symlink-escape/rejoin logic here (this
- * only reports what matched, not how to safely read it -- that's handled by
+ * filesystem-wide. No symlink-escape/rejoin logic here (this only reports
+ * what matched, not how to safely read it -- that's handled by
  * resolveRegularFileAt() when a match is later opened), so isRuntimeFsRoot()
- * branching isn't needed.
+ * branching isn't needed for correctness.
+ *
+ * It *is* needed for performance, though: for a running container (a
+ * /proc/<pid>/root runtime-fs root, see runtimeFsMount.ts), the top-level
+ * /proc, /sys, and /dev entries are the OCI runtime's own live mounts into
+ * the container's namespace -- kernel-virtual trees with thousands of
+ * synthetic entries (every process's /proc/<pid>/*, every /sys device node),
+ * not real files. A stopped container's snapshot/overlay mount never has
+ * these at all (they're added at container start, never part of the image
+ * layers), which is why the exact same query runs visibly slower on a
+ * running container than a stopped one -- the recursive find is walking all
+ * of /proc and /sys too. They're pruned by exact top-level path (not by
+ * `-name`, which would also skip an unrelated directory happening to be
+ * named "proc"/"sys"/"dev" deeper in the tree) so the browsable tree view
+ * (listDirectoryAt(), unaffected by this) still shows and can expand into
+ * them -- only the whole-filesystem search skips them. Real bind/volume
+ * mounts elsewhere in the tree are untouched and still searched normally.
  */
 export async function searchFilesAt(
   vm: VMExecutor,
@@ -470,7 +485,7 @@ export async function searchFilesAt(
   const script = `
 cd "$1" || exit 3
 lowerQuery=$(printf '%s' "$3" | tr 'A-Z' 'a-z')
-find . -mindepth 1 2>/dev/null | while IFS= read -r raw; do
+find . \\( -path ./proc -o -path ./sys -o -path ./dev \\) -prune -o -mindepth 1 -print 2>/dev/null | while IFS= read -r raw; do
   name="\${raw##*/}"
   lowerName=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
   case "$lowerName" in
