@@ -84,7 +84,7 @@ export async function mountContainerdSnapshot(
       '/usr/bin/ctr', ...namespaceArgs, `--address=${ options.address }`,
       'snapshot', 'mounts', workdir, options.snapshotKey);
 
-    await vm.execCommand({ root: true }, ...command.trim().split(' '));
+    await vm.execCommand({ root: true }, '/bin/sh', '-c', command.trim());
     cleanups.push(async() => {
       try {
         await vm.execCommand({ root: true }, '/bin/umount', workdir);

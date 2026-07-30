@@ -50,7 +50,7 @@ export async function resolveRuntimeFsRoot(vm: VMExecutor, pid: number, containe
 
   const root = `/proc/${ pid }/root`;
   const script = `
-if [ -d "$1" ] && grep -q "$2" "/proc/$3/cgroup" 2>/dev/null; then
+if [ -d "$1" ] && grep -qF "$2" "/proc/$3/cgroup" 2>/dev/null; then
   echo yes
 else
   echo no

@@ -127,6 +127,22 @@ describe('listDirectoryAt', () => {
     expect(result.totalEntryCount).toBe(5000);
     expect(result.truncated).toBe(true);
   });
+
+  // toAbsolute() is the sole gateway into the mounted rootfs for every
+  // operation in this file; a dirPath/filePath that isn't contained before
+  // being joined to mountRoot would let a crafted "../../.." value read
+  // outside the container's own mount entirely (path.posix.join alone does
+  // not clamp ".." segments). Rejecting here is what actually enforces that
+  // boundary -- see the equivalent, already-tested symlink-escape checks
+  // above for the same threat model applied to symlink targets instead of
+  // the input path itself.
+  it('rejects a dirPath that would resolve outside the mount root', async() => {
+    const vm = mockVM({ countScript: '0\n', listScript: 'should not be used' });
+
+    await expect(listDirectoryAt(vm, MOUNT_ROOT, '/../../../../etc'))
+      .rejects.toThrow('Path escapes the container filesystem');
+    expect((vm.execCommand as jest.Mock)).not.toHaveBeenCalled();
+  });
 });
 
 describe('listDirectoryAt against a runtime-fs (procfs) root', () => {
@@ -175,6 +191,17 @@ describe('statPathAt', () => {
     } as unknown as VMExecutor;
 
     await expect(statPathAt(vm, MOUNT_ROOT, '/missing')).rejects.toThrow('Path not found: /missing');
+  });
+
+  it('rejects a filePath that would resolve outside the mount root', async() => {
+    const vm = {
+      backend:     'lima',
+      execCommand: jest.fn(() => Promise.reject(new Error('should not be reached'))),
+    } as unknown as VMExecutor;
+
+    await expect(statPathAt(vm, MOUNT_ROOT, '/../../etc/shadow'))
+      .rejects.toThrow('Path escapes the container filesystem');
+    expect((vm.execCommand as jest.Mock)).not.toHaveBeenCalled();
   });
 });
 

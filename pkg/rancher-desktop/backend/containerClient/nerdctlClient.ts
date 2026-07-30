@@ -136,12 +136,6 @@ export class NerdctlClient implements ContainerEngineClient {
   }
 
   /**
-   * Parse the `Running`/`Pid` fields out of a `container inspect --format
-   * '{{json .State}}'` result, defaulting to "not running" on any
-   * unexpected shape so callers fall back to the snapshot mount rather than
-   * throwing.
-   */
-  /**
    * Mount the given (running or stopped) container's live filesystem inside
    * the VM, without exec-ing into it.  Unlike mountImage(), no throwaway
    * container needs to be created first: a container's own ID is already a

@@ -412,12 +412,6 @@ export class MobyClient implements ContainerEngineClient {
   }
 
   /**
-   * Parse the `Running`/`Pid` fields out of a `container inspect --format
-   * '{{json .State}}'` result, defaulting to "not running" on any
-   * unexpected shape so callers fall back to the snapshot/overlay mount
-   * rather than throwing.
-   */
-  /**
    * Mount a container's live filesystem (classic overlay2 graph driver
    * mode) inside the VM, without exec-ing into the container.
    *

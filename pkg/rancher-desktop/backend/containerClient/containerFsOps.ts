@@ -60,7 +60,13 @@ printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$islink" "$ftype" "$size" "$m
 `.trim();
 
 function toAbsolute(mountRoot: string, containerPath: string): string {
-  return path.posix.join(mountRoot, containerPath);
+  const joined = path.posix.normalize(path.posix.join(mountRoot, containerPath));
+
+  if (joined !== mountRoot && !joined.startsWith(`${ mountRoot }/`)) {
+    throw new Error(`Path escapes the container filesystem: ${ containerPath }`);
+  }
+
+  return joined;
 }
 
 function mapFileType(fileType: string, isLink: boolean): ContainerFileKind {
