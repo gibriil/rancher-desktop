@@ -1,5 +1,8 @@
 <template>
-  <div class="tree-node">
+  <div
+    class="tree-node"
+    role="group"
+  >
     <loading-indicator
       v-if="node && node.loading && !node.entries"
       class="tree-state"
@@ -33,6 +36,10 @@
           class="tree-row"
           :class="{ 'is-inert': isInert(entry), 'is-search-current': context.highlightedMatchPath === entry.path }"
           :data-tree-row-path="entry.path"
+          role="treeitem"
+          tabindex="0"
+          :aria-expanded="entry.kind === 'directory' ? isExpanded(entry.path) : undefined"
+          @keydown="onRowKeydown($event, entry)"
         >
           <div
             class="tree-primary"
@@ -123,9 +130,10 @@
 
 <script lang="ts">
 import { BadgeState, Banner } from '@rancher/components';
-import { defineComponent } from 'vue';
+import { defineComponent, PropType } from 'vue';
 
 import type { ContainerDirectoryEntry } from '@pkg/backend/containerClient/fileTypes';
+import type { TreeContext } from '@pkg/components/ContainerFiles.vue';
 import LoadingIndicator from '@pkg/components/LoadingIndicator.vue';
 
 /**
@@ -153,7 +161,7 @@ export default defineComponent({
       required: true,
     },
     context: {
-      type:     Object,
+      type:     Object as PropType<TreeContext>,
       required: true,
     },
   },
@@ -211,6 +219,58 @@ export default defineComponent({
         this.context.onSelectFile(entry);
       }
     },
+    /**
+     * Keyboard equivalent of the row's mouse interactions -- expand/collapse
+     * and file-open were previously mouse-only (@click on the chevron/label
+     * spans), which left the tree's core interaction entirely unreachable
+     * without a pointer. Enter/Space mirror onRowClick(); arrow-right/left
+     * expand/collapse a directory row directly; arrow-up/down move focus
+     * between visible rows.
+     */
+    onRowKeydown(event: KeyboardEvent, entry: ContainerDirectoryEntry) {
+      switch (event.key) {
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        this.onRowClick(entry);
+        break;
+      case 'ArrowRight':
+        if (entry.kind === 'directory' && !this.isInert(entry) && !this.isExpanded(entry.path)) {
+          event.preventDefault();
+          this.context.onToggleDir(entry.path);
+        }
+        break;
+      case 'ArrowLeft':
+        if (entry.kind === 'directory' && this.isExpanded(entry.path)) {
+          event.preventDefault();
+          this.context.onToggleDir(entry.path);
+        }
+        break;
+      case 'ArrowDown':
+        event.preventDefault();
+        this.focusAdjacentRow(event.currentTarget as HTMLElement, 1);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        this.focusAdjacentRow(event.currentTarget as HTMLElement, -1);
+        break;
+      }
+    },
+    /**
+     * Moves focus to the next/previous visible tree row, in document order.
+     * Queried live via the DOM -- the same data-tree-row-path convention
+     * ContainerFiles.vue's own search-reveal scrollToRow() already uses --
+     * rather than through a ref registry, since rows come and go across an
+     * arbitrarily deep, recursively-rendered tree with no single component
+     * that owns all of them.
+     */
+    focusAdjacentRow(current: HTMLElement, direction: 1 | -1) {
+      const rows = Array.from(current.ownerDocument.querySelectorAll<HTMLElement>('.tree-row[role="treeitem"]'));
+      const index = rows.indexOf(current);
+
+      if (index === -1) return;
+      rows[index + direction]?.focus();
+    },
   },
 });
 </script>
@@ -241,6 +301,11 @@ export default defineComponent({
 
   &:hover {
     background: var(--nav-bg);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
   }
 
   &.is-inert {

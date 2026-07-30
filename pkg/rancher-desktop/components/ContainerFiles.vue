@@ -1,7 +1,17 @@
 <template>
   <div class="container-files-component">
     <banner
-      v-if="capabilities && !capabilities.supported"
+      v-if="capabilitiesError"
+      class="content-state"
+      color="error"
+      data-testid="files-capabilities-error"
+    >
+      <span class="icon icon-warning icon-lg" />
+      {{ t('containerFiles.capabilitiesError', { error: capabilitiesError }) }}
+    </banner>
+
+    <banner
+      v-else-if="capabilities && !capabilities.supported"
       class="content-state"
       color="warning"
       data-testid="files-unavailable"
@@ -21,6 +31,7 @@
         <button
           class="btn btn-sm role-tertiary refresh-btn"
           :disabled="anyLoading"
+          :aria-label="t('containerFiles.refresh')"
           data-testid="files-refresh"
           @click="refresh"
         >
@@ -81,6 +92,7 @@
         </div>
         <div
           class="file-tree"
+          role="tree"
           data-testid="file-tree"
         >
           <loading-indicator
@@ -118,6 +130,7 @@
           <span class="preview-path">{{ selectedPath }}</span>
           <button
             class="btn btn-sm role-tertiary"
+            :aria-label="t('generic.close')"
             data-testid="preview-close"
             @click="closePreview"
           >
@@ -142,7 +155,11 @@
             color="info"
             data-testid="preview-download-only"
           >
-            <span>{{ preview.kind === 'too-large' ? t('containerFiles.tooLarge', { size: formatSize(preview.totalSize) }) : t('containerFiles.binaryFile') }}</span>
+            <span>{{
+              preview.kind === 'too-large'
+                ? t('containerFiles.tooLarge', { size: formatSize(preview.totalSize) })
+                : t('containerFiles.binaryFile')
+            }}</span>
             <button
               class="btn btn-sm role-primary download-btn"
               @click="downloadFile(selectedPath)"
@@ -173,23 +190,14 @@ import debounce from 'lodash/debounce';
 import { defineComponent } from 'vue';
 
 import type {
-  ContainerDiffEntry, ContainerDirectoryEntry, ContainerFilePreview, ContainerFilesCapabilities, ContainerMountInfo,
-  ContainerSearchMatch, ContainerSearchResult,
+  ContainerDiffEntry, ContainerDirectoryEntry, ContainerDirectoryListing, ContainerFilePreview,
+  ContainerFilesCapabilities, ContainerMountInfo, ContainerSearchMatch, ContainerSearchResult,
 } from '@pkg/backend/containerClient/fileTypes';
 import ContainerFileSearch from '@pkg/components/ContainerFileSearch.vue';
 import ContainerFileTreeNode from '@pkg/components/ContainerFileTreeNode.vue';
 import LoadingIndicator from '@pkg/components/LoadingIndicator.vue';
+import { ancestorPathsOf, generateRequestId, highlightSegments } from '@pkg/components/containerFilesHelpers';
 import { ipcRenderer } from '@pkg/utils/ipcRenderer';
-
-/**
- * A locally-unique ID to correlate an IPC request with its response -- no
- * cryptographic strength needed, so this deliberately avoids
- * `crypto.randomUUID()`, which isn't reliably present on the `crypto`
- * global across all Electron/Chromium builds this app runs on.
- */
-function generateRequestId(): string {
-  return `${ Date.now().toString(36) }-${ Math.random().toString(36).slice(2) }`;
-}
 
 /**
  * One directory's worth of state.  Keyed by absolute path in `nodes` below --
@@ -198,7 +206,7 @@ function generateRequestId(): string {
  * nodes can be independently loading/expanded/truncated at once (a tree, as
  * opposed to the single "current directory" the old breadcrumb browser had).
  */
-interface TreeNode {
+export interface TreeNode {
   entries:         ContainerDirectoryEntry[] | null; // null = never fetched
   expanded:        boolean;
   loading:         boolean;
@@ -208,61 +216,34 @@ interface TreeNode {
   requestId:       string | null; // the list request this node is currently waiting on, if any
 }
 
+/**
+ * The shape ContainerFileTreeNode.vue's `context` prop actually receives --
+ * exported so that component can type it precisely (Object as
+ * PropType<TreeContext>) instead of a bare `type: Object`, matching this
+ * codebase's own established typed-object-prop convention rather than
+ * leaving the single most complex value threaded through this feature
+ * untyped.
+ */
+export interface TreeContext {
+  nodes:                Record<string, TreeNode>;
+  decorate:             (entry: ContainerDirectoryEntry) => { diffStatus: ContainerDiffEntry['status'] | null, mountInfo: ContainerMountInfo | null };
+  onToggleDir:          (dirPath: string) => void;
+  onSelectFile:         (entry: ContainerDirectoryEntry) => void;
+  formatSize:           (bytes: number | null) => string;
+  formatDate:           (mtime: string | null) => string;
+  getFileIcon:          (entry: ContainerDirectoryEntry) => string;
+  diffBadgeColor:       (status: ContainerDiffEntry['status']) => string;
+  filterTerm:           string;
+  subtreeHasMatch:      (dirPath: string, term: string) => boolean;
+  highlightSegments:    (name: string, term: string) => { text: string, matched: boolean }[];
+  highlightedMatchPath: string | null;
+  t:                    (key: string, args?: Record<string, unknown>) => string;
+}
+
 function freshNode(expanded: boolean): TreeNode {
   return {
     entries: null, expanded, loading: false, error: null, truncated: false, totalEntryCount: null, requestId: null,
   };
-}
-
-/**
- * The directories that must be expanded/loaded to reveal `filePath` in the
- * tree -- every ancestor from the root down to (but not including) the
- * match's own parent-most containing directory.  The match itself is a row
- * rendered by its parent's listing, so it's never loaded/expanded on its own.
- */
-function ancestorPathsOf(filePath: string): string[] {
-  const parts = filePath.split('/').filter(Boolean);
-
-  parts.pop();
-  const paths = ['/'];
-  let cur = '';
-
-  for (const part of parts) {
-    cur += `/${ part }`;
-    paths.push(cur);
-  }
-
-  return paths;
-}
-
-/**
- * Split `name` into segments for highlighting a case-insensitive substring
- * match -- rendered as separate <span>s rather than v-html, since a
- * container's filenames are untrusted-ish data.
- */
-function highlightSegments(name: string, term: string): { text: string, matched: boolean }[] {
-  if (!term) {
-    return [{ text: name, matched: false }];
-  }
-
-  const lower = name.toLowerCase();
-  const segments: { text: string, matched: boolean }[] = [];
-  let i = 0;
-  let idx = lower.indexOf(term, i);
-
-  while (idx !== -1) {
-    if (idx > i) {
-      segments.push({ text: name.slice(i, idx), matched: false });
-    }
-    segments.push({ text: name.slice(idx, idx + term.length), matched: true });
-    i = idx + term.length;
-    idx = lower.indexOf(term, i);
-  }
-  if (i < name.length) {
-    segments.push({ text: name.slice(i), matched: false });
-  }
-
-  return segments;
 }
 
 interface ListWaiter {
@@ -272,6 +253,7 @@ interface ListWaiter {
 
 interface Data {
   capabilities:              ContainerFilesCapabilities | null;
+  capabilitiesError:         string | null;
   nodes:                     Record<string, TreeNode>;
   pendingListRequests:       Record<string, string>; // requestId -> path
   pendingListPromises:       Record<string, ListWaiter[]>; // requestId -> waiters for ensureDirLoaded()
@@ -343,6 +325,7 @@ export default defineComponent({
   data(): Data {
     return {
       capabilities:        null,
+      capabilitiesError:   null,
       nodes:               { '/': freshNode(true) },
       pendingListRequests: {},
       pendingListPromises: {},
@@ -420,7 +403,7 @@ export default defineComponent({
      * `nodes`/diff/mounts state and IPC, the tree nodes just read/dispatch
      * through this.
      */
-    treeContext() {
+    treeContext(): TreeContext {
       return {
         nodes:                this.nodes,
         decorate:             this.decorate,
@@ -460,6 +443,7 @@ export default defineComponent({
   },
   mounted() {
     ipcRenderer.on('container-files/capabilities', this.onCapabilities);
+    ipcRenderer.on('container-files/capabilities-error', this.onCapabilitiesError);
     ipcRenderer.on('container-files/list-result', this.onListResult);
     ipcRenderer.on('container-files/list-error', this.onListError);
     ipcRenderer.on('container-files/preview-result', this.onPreviewResult);
@@ -479,6 +463,7 @@ export default defineComponent({
   beforeUnmount() {
     ipcRenderer.send('container-files/close', this.containerId);
     ipcRenderer.removeAllListeners('container-files/capabilities');
+    ipcRenderer.removeAllListeners('container-files/capabilities-error');
     ipcRenderer.removeAllListeners('container-files/list-result');
     ipcRenderer.removeAllListeners('container-files/list-error');
     ipcRenderer.removeAllListeners('container-files/preview-result');
@@ -497,6 +482,7 @@ export default defineComponent({
     resetAndOpen() {
       ipcRenderer.send('container-files/close', this.containerId);
       this.capabilities = null;
+      this.capabilitiesError = null;
       this.pendingListRequests = {};
       // Any waiter still pending belonged to the tree that's about to be
       // thrown away -- reject rather than leaving it to hang forever, since
@@ -516,6 +502,30 @@ export default defineComponent({
       this.clearSearch();
       this.openSession();
     },
+    /**
+     * True if an IPC response naming `containerId` belongs to a since-
+     * abandoned container (the user switched tabs/containers before it
+     * arrived) rather than the one currently open. This same one-line check
+     * was previously copy-pasted verbatim into 9 separate IPC callbacks;
+     * three more callbacks need it plus one further staleness check specific
+     * to that response kind (a superseded preview/selection/search request)
+     * -- see isStalePreview/isStaleSelection/isStaleSearch below.
+     */
+    isStale(containerId: string): boolean {
+      return containerId !== this.containerId;
+    },
+    /** Stale for a preview/download response: wrong container, or superseded by a newer preview request. */
+    isStalePreview(containerId: string, requestId: string): boolean {
+      return this.isStale(containerId) || requestId !== this.previewRequestId;
+    },
+    /** Stale for a preview lifecycle event keyed by path rather than requestId (close/download-done/-error). */
+    isStaleSelection(containerId: string, filePath: string): boolean {
+      return this.isStale(containerId) || filePath !== this.selectedPath;
+    },
+    /** Stale for a full-search response: wrong container, or superseded by a newer search request. */
+    isStaleSearch(containerId: string, requestId: string): boolean {
+      return this.isStale(containerId) || requestId !== this.fullSearchRequestId;
+    },
     openSession() {
       ipcRenderer.send('container-files/open', this.containerId, this.namespace);
       ipcRenderer.send('container-files/diff', this.containerId);
@@ -523,11 +533,15 @@ export default defineComponent({
       this.requestList('/');
     },
     onCapabilities(_event: unknown, containerId: string, result: ContainerFilesCapabilities) {
-      if (containerId !== this.containerId) return;
+      if (this.isStale(containerId)) return;
       this.capabilities = result;
     },
+    onCapabilitiesError(_event: unknown, containerId: string, message: string) {
+      if (this.isStale(containerId)) return;
+      this.capabilitiesError = message;
+    },
     onStopped(_event: unknown, containerId: string) {
-      if (containerId !== this.containerId) return;
+      if (this.isStale(containerId)) return;
       this.rootNode.error = this.t('containerFiles.sessionStopped');
       this.rootNode.loading = false;
     },
@@ -543,8 +557,8 @@ export default defineComponent({
       this.pendingListRequests[requestId] = dirPath;
       ipcRenderer.send('container-files/list', requestId, this.containerId, dirPath);
     },
-    onListResult(_event: unknown, requestId: string, containerId: string, result: { path: string, entries: ContainerDirectoryEntry[], truncated: boolean, totalEntryCount: number | null }) {
-      if (containerId !== this.containerId) return;
+    onListResult(_event: unknown, requestId: string, containerId: string, result: ContainerDirectoryListing) {
+      if (this.isStale(containerId)) return;
       const dirPath = this.pendingListRequests[requestId];
 
       if (dirPath === undefined) return;
@@ -555,7 +569,8 @@ export default defineComponent({
       delete this.pendingListPromises[requestId];
 
       if (node?.requestId !== requestId) {
-        waiters?.forEach(waiter => waiter.reject(new Error(`Listing of ${ dirPath } was superseded by a newer request`)));
+        waiters?.forEach(waiter =>
+          waiter.reject(new Error(`Listing of ${ dirPath } was superseded by a newer request`)));
 
         return;
       }
@@ -567,7 +582,7 @@ export default defineComponent({
       waiters?.forEach(waiter => waiter.resolve(node));
     },
     onListError(_event: unknown, requestId: string, containerId: string, message: string) {
-      if (containerId !== this.containerId) return;
+      if (this.isStale(containerId)) return;
       const dirPath = this.pendingListRequests[requestId];
 
       if (dirPath === undefined) return;
@@ -578,7 +593,8 @@ export default defineComponent({
       delete this.pendingListPromises[requestId];
 
       if (node?.requestId !== requestId) {
-        waiters?.forEach(waiter => waiter.reject(new Error(`Listing of ${ dirPath } was superseded by a newer request`)));
+        waiters?.forEach(waiter =>
+          waiter.reject(new Error(`Listing of ${ dirPath } was superseded by a newer request`)));
 
         return;
       }
@@ -587,22 +603,31 @@ export default defineComponent({
       waiters?.forEach(waiter => waiter.reject(new Error(message)));
     },
     onDiffResult(_event: unknown, containerId: string, entries: ContainerDiffEntry[]) {
-      if (containerId !== this.containerId) return;
+      if (this.isStale(containerId)) return;
       this.diffEntries = entries;
     },
     onDiffError(_event: unknown, containerId: string, message: string) {
-      if (containerId !== this.containerId) return;
+      if (this.isStale(containerId)) return;
+      // Deliberately silent beyond a debug log: diffEntries simply stays
+      // whatever it was (empty, on first open) rather than surfacing a
+      // banner -- diff/mount data only ever drives small decorative badges
+      // (decorate(), above), never blocks the tree itself from working, so
+      // a failure here isn't worth interrupting the user over.
       console.debug('Failed to get container diff:', message);
     },
     onMountsResult(_event: unknown, containerId: string, mounts: ContainerMountInfo[]) {
-      if (containerId !== this.containerId) return;
+      if (this.isStale(containerId)) return;
       this.mountedPaths = mounts;
     },
     onMountsError(_event: unknown, containerId: string, message: string) {
-      if (containerId !== this.containerId) return;
+      if (this.isStale(containerId)) return;
+      // See onDiffError's comment above -- same reasoning applies here.
       console.debug('Failed to get container mounts:', message);
     },
-    /** Expands/collapses a directory node, fetching its children the first time (or after a refresh clears them). */
+    /**
+     * Expands/collapses a directory node, fetching its children the first
+     * time (or after a refresh clears them).
+     */
     toggleDir(dirPath: string) {
       const existing = this.nodes[dirPath];
 
@@ -643,16 +668,29 @@ export default defineComponent({
       if (node.entries !== null && !node.loading) {
         return Promise.resolve(node);
       }
-      if (!node.loading) {
+      // requestList() always sets node.requestId synchronously before
+      // returning, so "loading ⇒ requestId is set" should always hold --
+      // but re-request rather than trust that invariant unconditionally if
+      // it's ever violated by a future edit, since silently keying
+      // pendingListPromises on `undefined` would corrupt state rather than
+      // just fail loudly.
+      if (!node.loading || !node.requestId) {
         this.requestList(dirPath);
       }
-      const requestId = node.requestId!;
+      const { requestId } = node;
+
+      if (!requestId) {
+        return Promise.reject(new Error(`Failed to establish a list request for ${ dirPath }`));
+      }
 
       return new Promise((resolve, reject) => {
         (this.pendingListPromises[requestId] ??= []).push({ resolve, reject });
       });
     },
-    /** Re-fetches diff/mounts, plus every node that's currently expanded (not just the root), preserving expand state. */
+    /**
+     * Re-fetches diff/mounts, plus every node that's currently expanded (not
+     * just the root), preserving expand state.
+     */
     refresh() {
       ipcRenderer.send('container-files/diff', this.containerId);
       ipcRenderer.send('container-files/mounts', this.containerId);
@@ -687,12 +725,12 @@ export default defineComponent({
       ipcRenderer.send('container-files/preview', requestId, this.containerId, entry.path);
     },
     onPreviewResult(_event: unknown, requestId: string, containerId: string, result: ContainerFilePreview) {
-      if (containerId !== this.containerId || requestId !== this.previewRequestId) return;
+      if (this.isStalePreview(containerId, requestId)) return;
       this.preview = result;
       this.previewLoading = false;
     },
     onPreviewError(_event: unknown, requestId: string, containerId: string, message: string) {
-      if (containerId !== this.containerId || requestId !== this.previewRequestId) return;
+      if (this.isStalePreview(containerId, requestId)) return;
       this.previewError = message;
       this.previewLoading = false;
     },
@@ -708,11 +746,11 @@ export default defineComponent({
       ipcRenderer.send('container-files/download', this.containerId, filePath);
     },
     onDownloadDone(_event: unknown, containerId: string, filePath: string, hostPath: string) {
-      if (containerId !== this.containerId || filePath !== this.selectedPath) return;
+      if (this.isStaleSelection(containerId, filePath)) return;
       this.downloadMessage = this.t('containerFiles.downloadDone', { path: hostPath });
     },
     onDownloadError(_event: unknown, containerId: string, filePath: string, message: string) {
-      if (containerId !== this.containerId || filePath !== this.selectedPath) return;
+      if (this.isStaleSelection(containerId, filePath)) return;
       this.downloadMessage = this.t('containerFiles.downloadError', { error: message });
     },
     getFileIcon(entry: ContainerDirectoryEntry): string {
@@ -775,7 +813,7 @@ export default defineComponent({
       ipcRenderer.send('container-files/search', requestId, this.containerId, query);
     },
     onSearchResult(_event: unknown, requestId: string, containerId: string, result: ContainerSearchResult) {
-      if (containerId !== this.containerId || requestId !== this.fullSearchRequestId) return;
+      if (this.isStaleSearch(containerId, requestId)) return;
       this.fullSearchStatus = 'done';
       this.fullSearchMatches = result.matches;
       this.fullSearchTruncated = result.truncated;
@@ -787,17 +825,21 @@ export default defineComponent({
       }
     },
     onSearchError(_event: unknown, requestId: string, containerId: string, message: string) {
-      if (containerId !== this.containerId || requestId !== this.fullSearchRequestId) return;
+      if (this.isStaleSearch(containerId, requestId)) return;
       this.fullSearchStatus = 'error';
       this.fullSearchError = message;
     },
     searchNext() {
-      if (this.fullSearchMatches.length === 0) return;
-      this.jumpToMatch((this.fullSearchCurrentIndex + 1) % this.fullSearchMatches.length);
+      const matchCount = this.fullSearchMatches.length;
+
+      if (matchCount === 0) return;
+      this.jumpToMatch((this.fullSearchCurrentIndex + 1) % matchCount);
     },
     searchPrevious() {
-      if (this.fullSearchMatches.length === 0) return;
-      this.jumpToMatch((this.fullSearchCurrentIndex - 1 + this.fullSearchMatches.length) % this.fullSearchMatches.length);
+      const matchCount = this.fullSearchMatches.length;
+
+      if (matchCount === 0) return;
+      this.jumpToMatch((this.fullSearchCurrentIndex - 1 + matchCount) % matchCount);
     },
     /**
      * Expands/loads every ancestor directory down to `path` (fetching any
@@ -840,7 +882,10 @@ export default defineComponent({
         this.revealPath(match.path, generation).then(() => this.markRevealed(index, generation));
       });
     },
-    /** Records that fullSearchMatches[index]'s reveal has settled, unless a newer search/reset has since superseded `generation`. */
+    /**
+     * Records that fullSearchMatches[index]'s reveal has settled, unless a
+     * newer search/reset has since superseded `generation`.
+     */
     markRevealed(index: number, generation: number) {
       if (generation !== this.expandWalkGeneration) return;
       this.revealedMatchIndices.add(index);

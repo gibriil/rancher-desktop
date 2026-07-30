@@ -60,7 +60,10 @@ export function parseMountsOutput(stdout: string): ContainerMountInfo[] {
   }
 
   return raw
-    .filter(m => !IMPLICIT_MOUNT_DESTINATIONS.has(m.Destination))
+    // `m` is trusted-external JSON (docker/nerdctl's own inspect output) --
+    // guard against a malformed/null entry rather than assuming every
+    // element is the object shape we expect.
+    .filter(m => typeof m === 'object' && m !== null && !IMPLICIT_MOUNT_DESTINATIONS.has(m.Destination))
     .map(m => ({
       type:        String(m.Type ?? ''),
       source:      String(m.Source ?? ''),

@@ -23,7 +23,9 @@ import {
   ContainerFileStat, ContainerMountInfo, ContainerSearchResult,
 } from '@pkg/backend/containerClient/fileTypes';
 import dockerRegistry from '@pkg/backend/containerClient/registry';
-import { isRuntimeFsRoot, resolveRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
+import {
+  parseContainerState, resolveRuntimeFsRoot, withMount,
+} from '@pkg/backend/containerClient/runtimeFsMount';
 import { mountContainerdSnapshot, runCleanups } from '@pkg/backend/containerClient/snapshotMount';
 import { ErrorCommand, spawn, spawnFile } from '@pkg/utils/childProcess';
 import { parseImageReference } from '@pkg/utils/dockerUtils';
@@ -399,6 +401,12 @@ export class MobyClient implements ContainerEngineClient {
 
       return typeof address === 'string' && address ? address : null;
     } catch {
+      // Silent, deliberate fallback -- any failure here (a malformed `docker
+      // info` response, an unreachable daemon momentarily) is treated the
+      // same as "not using the snapshotter", so mountContainer() falls back
+      // to the classic overlay2 path rather than throwing. That fallback is
+      // always a valid mount strategy on a real Moby install, so logging
+      // every occurrence would just be noise, not a signal of a real problem.
       return null;
     }
   }
@@ -409,40 +417,6 @@ export class MobyClient implements ContainerEngineClient {
    * unexpected shape so callers fall back to the snapshot/overlay mount
    * rather than throwing.
    */
-  private parseContainerState(stdout: string): { running: boolean, pid: number } {
-    try {
-      const state = JSON.parse(stdout.trim());
-
-      return { running: state?.Running === true, pid: Number(state?.Pid) || 0 };
-    } catch {
-      return { running: false, pid: 0 };
-    }
-  }
-
-  /**
-   * If mountRoot is a live runtime-fs root (see runtimeFsMount.ts) and ex
-   * indicates the underlying operation failed, remap it to a clear message
-   * about the container having stopped or restarted mid-browse, rather than
-   * whatever raw failure a vanished /proc/<pid>/root produces.
-   */
-  private remapRuntimeFsError(mountRoot: string, containerId: string, ex: unknown): unknown {
-    if (isRuntimeFsRoot(mountRoot)) {
-      // Include the real cause inline rather than only attaching it via
-      // `.cause` (which never reaches the renderer -- see main/containerFiles.ts's
-      // errorMessage()). A container that's genuinely stopped/restarted
-      // mid-browse is one real cause, but not the only one; surfacing the
-      // actual message keeps this honest if it's something else entirely.
-      const reason = ex instanceof Error ? ex.message : String(ex);
-
-      return new Error(
-        `Container ${ containerId } appears to have stopped or restarted while browsing, or the request failed transiently (${ reason }); refresh and try again.`,
-        { cause: ex },
-      );
-    }
-
-    return ex;
-  }
-
   /**
    * Mount a container's live filesystem (classic overlay2 graph driver
    * mode) inside the VM, without exec-ing into the container.
@@ -530,7 +504,7 @@ export class MobyClient implements ContainerEngineClient {
    */
   protected async mountContainer(containerId: string): Promise<[string, (() => Promise<void>)[]]> {
     const { stdout } = await this.runClient(['container', 'inspect', containerId, '--format', '{{json .State}}'], 'pipe');
-    const { running, pid } = this.parseContainerState(stdout);
+    const { running, pid } = parseContainerState(stdout);
 
     if (running && pid) {
       const runtimeRoot = await resolveRuntimeFsRoot(this.vm, pid, containerId);
@@ -550,51 +524,31 @@ export class MobyClient implements ContainerEngineClient {
   }
 
   async listContainerDirectory(containerId: string, dirPath: string): Promise<ContainerDirectoryListing> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId);
-
-    try {
-      return await listDirectoryAt(this.vm, mountRoot, dirPath);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    return withMount(
+      this.mountContainer.bind(this), containerId, undefined,
+      mountRoot => listDirectoryAt(this.vm, mountRoot, dirPath),
+    );
   }
 
   async statContainerPath(containerId: string, filePath: string): Promise<ContainerFileStat> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId);
-
-    try {
-      return await statPathAt(this.vm, mountRoot, filePath);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    return withMount(
+      this.mountContainer.bind(this), containerId, undefined,
+      mountRoot => statPathAt(this.vm, mountRoot, filePath),
+    );
   }
 
   async readContainerFilePreview(containerId: string, filePath: string): Promise<ContainerFilePreview> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId);
-
-    try {
-      return await readFilePreviewAt(this.vm, mountRoot, filePath);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    return withMount(
+      this.mountContainer.bind(this), containerId, undefined,
+      mountRoot => readFilePreviewAt(this.vm, mountRoot, filePath),
+    );
   }
 
   async searchContainerFiles(containerId: string, query: string): Promise<ContainerSearchResult> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId);
-
-    try {
-      return await searchFilesAt(this.vm, mountRoot, query);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    return withMount(
+      this.mountContainer.bind(this), containerId, undefined,
+      mountRoot => searchFilesAt(this.vm, mountRoot, query),
+    );
   }
 
   async getContainerDiff(containerId: string): Promise<ContainerDiffEntry[]> {
@@ -618,15 +572,10 @@ export class MobyClient implements ContainerEngineClient {
   }
 
   async downloadContainerFile(containerId: string, filePath: string, destinationPath: string): Promise<void> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId);
-
-    try {
-      await downloadFileAt(this.vm, mountRoot, filePath, destinationPath);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    await withMount(
+      this.mountContainer.bind(this), containerId, undefined,
+      mountRoot => downloadFileAt(this.vm, mountRoot, filePath, destinationPath),
+    );
   }
 
   async getTags(imageName: string, options?: ContainerBasicOptions) {

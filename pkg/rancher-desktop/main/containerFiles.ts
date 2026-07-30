@@ -119,7 +119,8 @@ export class ContainerFilesHandler {
       withTimeout(this.client.getContainerFilesCapabilities(containerId, { namespace }), `Checking files support for ${ containerId }`)
         .then(result => sendToFrame('container-files/capabilities', containerId, result))
         .catch((ex) => {
-          console.debug(`Failed to get files capabilities for ${ containerId }:`, ex);
+          console.error(`Failed to get files capabilities for ${ containerId }:`, ex);
+          sendToFrame('container-files/capabilities-error', containerId, errorMessage(ex));
         });
     });
 

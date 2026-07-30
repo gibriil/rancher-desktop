@@ -267,6 +267,7 @@ export interface IpcRendererEvents {
   'container-files/search-result':      (requestId: string, containerId: string, result: ContainerSearchResult) => void;
   'container-files/search-error':       (requestId: string, containerId: string, message: string) => void;
   'container-files/capabilities':       (containerId: string, result: ContainerFilesCapabilities) => void;
+  'container-files/capabilities-error': (containerId: string, message: string) => void;
   'container-files/diff-result':        (containerId: string, entries: ContainerDiffEntry[]) => void;
   'container-files/diff-error':         (containerId: string, message: string) => void;
   'container-files/mounts-result':      (containerId: string, mounts: ContainerMountInfo[]) => void;

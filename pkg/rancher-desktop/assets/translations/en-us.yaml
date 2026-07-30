@@ -873,6 +873,10 @@ integrations:
     description: Expose Rancher Desktop's Kubernetes configuration and Docker socket to Windows Subsystem for Linux (WSL) distros
 containerFiles:
   unavailable: This container's filesystem cannot currently be browsed.
+  # @context Shown when checking whether the Files tab is even usable for this container fails outright (a transient VM/engine error), as distinct from a definitive "not supported" answer
+  capabilitiesError: 'Could not determine whether this container''s filesystem can be browsed: {error}'
+  # @context Accessible name for the icon-only refresh button in the Files tab header
+  refresh: Refresh files
   loading: Loading files…
   noFiles: This directory is empty.
   truncated: 'Showing {shown} of {total} entries.'

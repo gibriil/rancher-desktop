@@ -23,9 +23,11 @@ import {
   ContainerFileStat, ContainerMountInfo, ContainerSearchResult,
 } from '@pkg/backend/containerClient/fileTypes';
 import dockerRegistry from '@pkg/backend/containerClient/registry';
-import { isRuntimeFsRoot, resolveRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
 import {
-  execCommandWithRetries as execCommandWithRetriesHelper, mountContainerdSnapshot, runCleanups,
+  parseContainerState, resolveRuntimeFsRoot, withMount,
+} from '@pkg/backend/containerClient/runtimeFsMount';
+import {
+  execCommandWithRetries as execCommandWithRetriesHelper, mountContainerdSnapshot,
 } from '@pkg/backend/containerClient/snapshotMount';
 import { spawn, spawnFile } from '@pkg/utils/childProcess';
 import { parseImageReference } from '@pkg/utils/dockerUtils';
@@ -139,40 +141,6 @@ export class NerdctlClient implements ContainerEngineClient {
    * unexpected shape so callers fall back to the snapshot mount rather than
    * throwing.
    */
-  private parseContainerState(stdout: string): { running: boolean, pid: number } {
-    try {
-      const state = JSON.parse(stdout.trim());
-
-      return { running: state?.Running === true, pid: Number(state?.Pid) || 0 };
-    } catch {
-      return { running: false, pid: 0 };
-    }
-  }
-
-  /**
-   * If mountRoot is a live runtime-fs root (see runtimeFsMount.ts) and ex
-   * indicates the underlying operation failed, remap it to a clear message
-   * about the container having stopped or restarted mid-browse, rather than
-   * whatever raw failure a vanished /proc/<pid>/root produces.
-   */
-  private remapRuntimeFsError(mountRoot: string, containerId: string, ex: unknown): unknown {
-    if (isRuntimeFsRoot(mountRoot)) {
-      // Include the real cause inline rather than only attaching it via
-      // `.cause` (which never reaches the renderer -- see main/containerFiles.ts's
-      // errorMessage()). A container that's genuinely stopped/restarted
-      // mid-browse is one real cause, but not the only one; surfacing the
-      // actual message keeps this honest if it's something else entirely.
-      const reason = ex instanceof Error ? ex.message : String(ex);
-
-      return new Error(
-        `Container ${ containerId } appears to have stopped or restarted while browsing, or the request failed transiently (${ reason }); refresh and try again.`,
-        { cause: ex },
-      );
-    }
-
-    return ex;
-  }
-
   /**
    * Mount the given (running or stopped) container's live filesystem inside
    * the VM, without exec-ing into it.  Unlike mountImage(), no throwaway
@@ -193,7 +161,7 @@ export class NerdctlClient implements ContainerEngineClient {
     const namespaceArgs = namespace === undefined ? [] : ['--namespace', namespace];
     const { stdout } = await this.runClient(
       [...namespaceArgs, 'container', 'inspect', '--format', '{{json .State}}', containerId], 'pipe');
-    const { running, pid } = this.parseContainerState(stdout);
+    const { running, pid } = parseContainerState(stdout);
 
     if (running && pid) {
       const runtimeRoot = await resolveRuntimeFsRoot(this.vm, pid, containerId);
@@ -303,51 +271,31 @@ export class NerdctlClient implements ContainerEngineClient {
   }
 
   async listContainerDirectory(containerId: string, dirPath: string, options?: ContainerBasicOptions): Promise<ContainerDirectoryListing> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId, options?.namespace);
-
-    try {
-      return await listDirectoryAt(this.vm, mountRoot, dirPath);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    return withMount(
+      this.mountContainer.bind(this), containerId, options?.namespace,
+      mountRoot => listDirectoryAt(this.vm, mountRoot, dirPath),
+    );
   }
 
   async statContainerPath(containerId: string, filePath: string, options?: ContainerBasicOptions): Promise<ContainerFileStat> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId, options?.namespace);
-
-    try {
-      return await statPathAt(this.vm, mountRoot, filePath);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    return withMount(
+      this.mountContainer.bind(this), containerId, options?.namespace,
+      mountRoot => statPathAt(this.vm, mountRoot, filePath),
+    );
   }
 
   async readContainerFilePreview(containerId: string, filePath: string, options?: ContainerBasicOptions): Promise<ContainerFilePreview> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId, options?.namespace);
-
-    try {
-      return await readFilePreviewAt(this.vm, mountRoot, filePath);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    return withMount(
+      this.mountContainer.bind(this), containerId, options?.namespace,
+      mountRoot => readFilePreviewAt(this.vm, mountRoot, filePath),
+    );
   }
 
   async searchContainerFiles(containerId: string, query: string, options?: ContainerBasicOptions): Promise<ContainerSearchResult> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId, options?.namespace);
-
-    try {
-      return await searchFilesAt(this.vm, mountRoot, query);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    return withMount(
+      this.mountContainer.bind(this), containerId, options?.namespace,
+      mountRoot => searchFilesAt(this.vm, mountRoot, query),
+    );
   }
 
   async getContainerDiff(containerId: string, options?: ContainerBasicOptions): Promise<ContainerDiffEntry[]> {
@@ -372,15 +320,10 @@ export class NerdctlClient implements ContainerEngineClient {
   }
 
   async downloadContainerFile(containerId: string, filePath: string, destinationPath: string, options?: ContainerBasicOptions): Promise<void> {
-    const [mountRoot, cleanups] = await this.mountContainer(containerId, options?.namespace);
-
-    try {
-      await downloadFileAt(this.vm, mountRoot, filePath, destinationPath);
-    } catch (ex) {
-      throw this.remapRuntimeFsError(mountRoot, containerId, ex);
-    } finally {
-      await runCleanups(cleanups);
-    }
+    await withMount(
+      this.mountContainer.bind(this), containerId, options?.namespace,
+      mountRoot => downloadFileAt(this.vm, mountRoot, filePath, destinationPath),
+    );
   }
 
   async getTags(imageName: string, options?: ContainerBasicOptions) {

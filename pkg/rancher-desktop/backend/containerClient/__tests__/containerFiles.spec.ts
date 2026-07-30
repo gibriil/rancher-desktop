@@ -3,8 +3,11 @@
 import { jest } from '@jest/globals';
 
 import type { VMExecutor } from '@pkg/backend/backend';
-import { listDirectoryAt, searchFilesAt, statPathAt } from '@pkg/backend/containerClient/containerFsOps';
+import {
+  listDirectoryAt, resolveRegularFileAt, searchFilesAt, statPathAt,
+} from '@pkg/backend/containerClient/containerFsOps';
 import { parseDiffOutput, parseMountsOutput } from '@pkg/backend/containerClient/dockerFormatParsers';
+import { isRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
 
 describe('parseDiffOutput', () => {
   it('parses added/changed/deleted entries', () => {
@@ -172,6 +175,109 @@ describe('statPathAt', () => {
     } as unknown as VMExecutor;
 
     await expect(statPathAt(vm, MOUNT_ROOT, '/missing')).rejects.toThrow('Path not found: /missing');
+  });
+});
+
+describe('isRuntimeFsRoot', () => {
+  it('recognizes a /proc/<pid>/root magic-root path', () => {
+    expect(isRuntimeFsRoot('/proc/4242/root')).toBe(true);
+    expect(isRuntimeFsRoot('/proc/1/root')).toBe(true);
+  });
+
+  it('does not mistake a real mktemp-style mount root, or a lookalike path, for a runtime-fs root', () => {
+    expect(isRuntimeFsRoot('/tmp/rd-container-files-XXXXXX')).toBe(false);
+    // Must anchor at both ends -- a path merely containing the pattern isn't enough.
+    expect(isRuntimeFsRoot('/proc/4242/root/etc')).toBe(false);
+    expect(isRuntimeFsRoot('/mnt/proc/4242/root')).toBe(false);
+    expect(isRuntimeFsRoot('/proc/not-a-pid/root')).toBe(false);
+  });
+});
+
+// This is the function that actually *enforces* the "a symlink escaping the
+// container filesystem is never followed" security boundary -- previously,
+// only buildEntry()'s *labeling* of an escaping symlink (via listDirectoryAt,
+// above) had test coverage, not the code path that actually blocks a
+// preview/download from following one. See known-bugs.md #7-adjacent
+// reasoning in the style guide this branch was reviewed against: security-
+// adjacent logic doesn't ship without a test.
+describe('resolveRegularFileAt', () => {
+  /**
+   * Distinguishes call shapes by inspecting the actual positional args
+   * rather than call order: the stat script (shared by both the initial-file
+   * stat and the resolved-target's stat, keyed here by which basename ($2)
+   * it's stat-ing) versus the standalone `readlink -f` call this function
+   * makes itself, independent of whatever the initial stat already computed.
+   */
+  function mockResolveVM(config: { statByName: Record<string, string>, readlinkResult: string }): VMExecutor {
+    return {
+      backend:     'lima',
+      execCommand: jest.fn((...args: any[]) => {
+        const command = typeof args[0] === 'object' ? args.slice(1) : args;
+        const script = command[2] as string;
+
+        if (script.includes('readlink -f -- "$1"')) {
+          return Promise.resolve(config.readlinkResult);
+        }
+        const name = command[5] as string;
+
+        return Promise.resolve(config.statByName[name] ?? '');
+      }),
+    } as unknown as VMExecutor;
+  }
+
+  it('blocks a symlink already flagged as escaping the mount by its initial stat, without following it further', async() => {
+    const vm = mockResolveVM({
+      statByName:     { 'evil-link': ['1', 'symbolic link', '', '', 'lrwxrwxrwx', '/etc/shadow', '/etc/shadow', '0'].join('\t') },
+      readlinkResult: 'should not be reached',
+    });
+
+    await expect(resolveRegularFileAt(vm, MOUNT_ROOT, '/evil-link', 'preview'))
+      .rejects.toThrow('symlink target is outside the container filesystem');
+    // Only the initial stat call should happen -- must reject before ever
+    // issuing its own readlink -f.
+    expect((vm.execCommand as jest.Mock)).toHaveBeenCalledTimes(1);
+  });
+
+  it("independently rejects a symlink whose live-resolved target escapes the mount, even when the initial stat didn't flag it", async() => {
+    // Deliberately inconsistent with what a real stat script would ever
+    // return together, to prove this function's own readlink -f check is a
+    // genuine, separate verification -- not just trusting buildEntry's
+    // already-computed flag from the first stat call.
+    const vm = mockResolveVM({
+      statByName:     { 'sneaky-link': ['1', 'symbolic link', '', '', 'lrwxrwxrwx', 'elsewhere', `${ MOUNT_ROOT }/elsewhere`, '1'].join('\t') },
+      readlinkResult: '/etc/shadow',
+    });
+
+    await expect(resolveRegularFileAt(vm, MOUNT_ROOT, '/sneaky-link', 'preview'))
+      .rejects.toThrow('symlink target is outside the container filesystem');
+  });
+
+  it('resolves an ordinary in-mount symlink to its target file', async() => {
+    const vm = mockResolveVM({
+      statByName: {
+        'safe-link':     ['1', 'symbolic link', '', '', 'lrwxrwxrwx', 'real-file.txt', `${ MOUNT_ROOT }/real-file.txt`, '1'].join('\t'),
+        'real-file.txt': ['0', 'regular file', '42', '1700000000', '-rw-r--r--', '', '', '0'].join('\t'),
+      },
+      readlinkResult: `${ MOUNT_ROOT }/real-file.txt`,
+    });
+
+    const result = await resolveRegularFileAt(vm, MOUNT_ROOT, '/safe-link', 'preview');
+
+    expect(result.targetPath).toBe('/real-file.txt');
+    expect(result.stat.kind).toBe('file');
+  });
+
+  it('rejects a symlink whose target resolves to something other than a regular file', async() => {
+    const vm = mockResolveVM({
+      statByName: {
+        'dir-link': ['1', 'symbolic link', '', '', 'lrwxrwxrwx', 'some-dir', `${ MOUNT_ROOT }/some-dir`, '1'].join('\t'),
+        'some-dir': ['0', 'directory', '', '1700000000', 'drwxr-xr-x', '', '', '0'].join('\t'),
+      },
+      readlinkResult: `${ MOUNT_ROOT }/some-dir`,
+    });
+
+    await expect(resolveRegularFileAt(vm, MOUNT_ROOT, '/dir-link', 'download'))
+      .rejects.toThrow('not a regular file');
   });
 });
 

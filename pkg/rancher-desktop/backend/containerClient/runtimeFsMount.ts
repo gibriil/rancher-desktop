@@ -19,7 +19,7 @@
  */
 
 import { VMExecutor } from '@pkg/backend/backend';
-import { execCommandWithRetries } from '@pkg/backend/containerClient/snapshotMount';
+import { execCommandWithRetries, runCleanups } from '@pkg/backend/containerClient/snapshotMount';
 
 /**
  * Confirm that `/proc/<pid>/root` is usable as a live view of `containerId`'s
@@ -76,4 +76,77 @@ fi
  */
 export function isRuntimeFsRoot(mountRoot: string): boolean {
   return /^\/proc\/\d+\/root$/.test(mountRoot);
+}
+
+/**
+ * Parse the `Running`/`Pid` fields out of a `container inspect --format
+ * '{{json .State}}'` result, defaulting to "not running" on any unexpected
+ * shape so callers fall back to the snapshot/overlay mount rather than
+ * throwing.
+ *
+ * Shared between NerdctlClient and MobyClient -- both parse the exact same
+ * `docker`/`nerdctl container inspect --format '{{json .State}}'` shape.
+ */
+export function parseContainerState(stdout: string): { running: boolean, pid: number } {
+  try {
+    const state = JSON.parse(stdout.trim());
+
+    return { running: state?.Running === true, pid: Number(state?.Pid) || 0 };
+  } catch {
+    return { running: false, pid: 0 };
+  }
+}
+
+/**
+ * If mountRoot is a live runtime-fs root (see resolveRuntimeFsRoot() above)
+ * and ex indicates the underlying operation failed, remap it to a clear
+ * message about the container having stopped or restarted mid-browse,
+ * rather than whatever raw failure a vanished /proc/<pid>/root produces.
+ *
+ * Shared between NerdctlClient and MobyClient -- both need the identical
+ * remapping regardless of which mount mechanism produced mountRoot.
+ */
+export function remapRuntimeFsError(mountRoot: string, containerId: string, ex: unknown): unknown {
+  if (isRuntimeFsRoot(mountRoot)) {
+    // Include the real cause inline rather than only attaching it via
+    // `.cause` (which never reaches the renderer -- see main/containerFiles.ts's
+    // errorMessage()). A container that's genuinely stopped/restarted
+    // mid-browse is one real cause, but not the only one; surfacing the
+    // actual message keeps this honest if it's something else entirely.
+    const reason = ex instanceof Error ? ex.message : String(ex);
+
+    return new Error(
+      `Container ${ containerId } appears to have stopped or restarted while browsing, or the request failed transiently (${ reason }); refresh and try again.`,
+      { cause: ex },
+    );
+  }
+
+  return ex;
+}
+
+/**
+ * Mount → run one file-browsing operation → remap a runtime-fs error →
+ * clean up, in that order -- the shape every one of NerdctlClient's and
+ * MobyClient's five file-browsing methods needs identically, previously
+ * duplicated ten times (five methods × two clients) rather than shared.
+ *
+ * `mountContainer` is passed in rather than called directly because it's
+ * engine-specific (each client's own mount-selection logic); everything
+ * after the mount (the try/remap/cleanup shape) is not.
+ */
+export async function withMount<T>(
+  mountContainer: (containerId: string, namespace?: string) => Promise<[string, (() => Promise<void>)[]]>,
+  containerId: string,
+  namespace: string | undefined,
+  op: (mountRoot: string) => Promise<T>,
+): Promise<T> {
+  const [mountRoot, cleanups] = await mountContainer(containerId, namespace);
+
+  try {
+    return await op(mountRoot);
+  } catch (ex) {
+    throw remapRuntimeFsError(mountRoot, containerId, ex);
+  } finally {
+    await runCleanups(cleanups);
+  }
 }
