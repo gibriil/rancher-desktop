@@ -10,6 +10,8 @@
  * fighting that rather than working around it.
  */
 
+import type { ContainerDirectoryEntry } from '@pkg/backend/containerClient/fileTypes';
+
 /**
  * A locally-unique ID to correlate an IPC request with its response -- no
  * cryptographic strength needed, so this deliberately avoids
@@ -69,4 +71,23 @@ export function highlightSegments(name: string, term: string): { text: string, m
   }
 
   return segments;
+}
+
+/**
+ * `path` is always POSIX-style, absolute from the container root (see
+ * ContainerDirectoryEntry.path's own doc comment) -- "relative" here means
+ * relative to that root, e.g. `/etc/hosts` -> `etc/hosts`.
+ */
+export function relativeContainerPath(path: string): string {
+  return path.replace(/^\/+/, '');
+}
+
+/** A symlink escaping the container's mount is shown but never followed -- this is the feature's security boundary. */
+export function isInertEntry(entry: ContainerDirectoryEntry): boolean {
+  return entry.kind === 'symlink' && entry.symlinkEscapesRoot;
+}
+
+/** Only regular files and (non-inert) symlinks have file content that can actually be downloaded. */
+export function isDownloadableEntry(entry: ContainerDirectoryEntry): boolean {
+  return !isInertEntry(entry) && (entry.kind === 'file' || entry.kind === 'symlink');
 }

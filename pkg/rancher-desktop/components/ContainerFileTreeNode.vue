@@ -36,10 +36,15 @@
           class="tree-row"
           :class="{ 'is-inert': isInert(entry), 'is-search-current': context.highlightedMatchPath === entry.path }"
           :data-tree-row-path="entry.path"
+          :data-row-focus="isFocused(entry)"
+          :data-tree-row-menu-open="isMenuOpen(entry)"
           role="treeitem"
           tabindex="0"
           :aria-expanded="entry.kind === 'directory' ? isExpanded(entry.path) : undefined"
           @keydown="onRowKeydown($event, entry)"
+          @contextmenu="onRowContextMenu($event, entry)"
+          @focus="context.onRowFocus(entry.path)"
+          @blur="context.onRowBlur(entry.path)"
         >
           <div
             class="tree-primary"
@@ -134,7 +139,9 @@ import { defineComponent, PropType } from 'vue';
 
 import type { ContainerDirectoryEntry } from '@pkg/backend/containerClient/fileTypes';
 import type { TreeContext } from '@pkg/components/ContainerFiles.vue';
+import { isInertEntry } from '@pkg/components/containerFilesHelpers';
 import LoadingIndicator from '@pkg/components/LoadingIndicator.vue';
+import { suppressContextMenu } from '@pkg/utils/platform';
 
 /**
  * One directory's worth of rows in the container filesystem tree, recursing
@@ -203,10 +210,22 @@ export default defineComponent({
     },
     /** A symlink escaping the container's mount is shown but never followed -- this is the feature's security boundary. */
     isInert(entry: ContainerDirectoryEntry): boolean {
-      return entry.kind === 'symlink' && entry.symlinkEscapesRoot;
+      return isInertEntry(entry);
     },
     rowTitle(entry: ContainerDirectoryEntry): string | undefined {
       return this.isInert(entry) ? this.context.t('containerFiles.symlinkEscapesRoot') : undefined;
+    },
+    /**
+     * Drives the row's focus outline together with isMenuOpen() below,
+     * rather than :focus-visible alone -- opening this row's context menu
+     * moves real DOM focus onto a menu item, which would otherwise make the
+     * row look unfocused for as long as its own menu is open.
+     */
+    isFocused(entry: ContainerDirectoryEntry): boolean {
+      return this.context.focusedPath === entry.path;
+    },
+    isMenuOpen(entry: ContainerDirectoryEntry): boolean {
+      return this.context.menuOpenPath === entry.path;
     },
     decorated(entry: ContainerDirectoryEntry) {
       return this.context.decorate(entry);
@@ -220,12 +239,35 @@ export default defineComponent({
       }
     },
     /**
+     * Opens the row's context menu at the click point, reusing the same
+     * global ActionMenu/action-menu-store mechanism SortableTable's own
+     * per-row right-click menu already relies on (selection.js's
+     * onRowContext) -- including respecting the same Ctrl-click convention
+     * so the native macOS context menu still comes through untouched.
+     */
+    onRowContextMenu(event: MouseEvent, entry: ContainerDirectoryEntry) {
+      if (suppressContextMenu(event)) return;
+      event.preventDefault();
+      // Explicitly focus the row -- a right-click doesn't reliably move
+      // focus to it the way a left-click does, which left the row without
+      // its focus-visible outline and, separately, meant the menu had
+      // nothing correct to restore focus to once it closed.
+      (event.currentTarget as HTMLElement).focus();
+      this.context.onMenuOpen(entry.path);
+      this.$store.commit('action-menu/show', {
+        resources: [this.context.menuResourceFor(entry)],
+        event,
+      });
+    },
+    /**
      * Keyboard equivalent of the row's mouse interactions -- expand/collapse
      * and file-open were previously mouse-only (@click on the chevron/label
      * spans), which left the tree's core interaction entirely unreachable
      * without a pointer. Enter/Space mirror onRowClick(); arrow-right/left
      * expand/collapse a directory row directly; arrow-up/down move focus
-     * between visible rows.
+     * between visible rows; the ContextMenu key or Shift+F10 (the standard
+     * OS conventions) open the same context menu a right-click does,
+     * anchored to the name label rather than a click point.
      */
     onRowKeydown(event: KeyboardEvent, entry: ContainerDirectoryEntry) {
       switch (event.key) {
@@ -233,6 +275,20 @@ export default defineComponent({
       case ' ':
         event.preventDefault();
         this.onRowClick(entry);
+        break;
+      case 'ContextMenu':
+      case 'F10':
+        if (event.key === 'F10' && !event.shiftKey) break;
+        event.preventDefault();
+        this.context.onMenuOpen(entry.path);
+        this.$store.commit('action-menu/show', {
+          resources: [this.context.menuResourceFor(entry)],
+          // Anchored to the name label itself -- ActionMenu.vue positions a
+          // keyboard-opened (elem-anchored) menu flush over its trigger, so
+          // this lands the menu right at the name, same as a native
+          // dropdown hanging from what opened it.
+          elem: (event.currentTarget as HTMLElement).querySelector<HTMLElement>('.tree-label') ?? event.currentTarget as HTMLElement,
+        });
         break;
       case 'ArrowRight':
         if (entry.kind === 'directory' && !this.isInert(entry) && !this.isExpanded(entry.path)) {
@@ -303,8 +359,23 @@ export default defineComponent({
     background: var(--nav-bg);
   }
 
-  &:focus-visible {
+  // :focus-visible alone isn't enough: opening this row's context menu
+  // moves real DOM focus onto a menu item (see isFocused()/isMenuOpen()
+  // above), which would otherwise drop the outline for as long as the menu
+  // stays open even though the row is still what the user is "on."
+  &:focus-visible,
+  &[data-row-focus="true"] {
     outline: 2px solid var(--primary);
+    outline-offset: -2px;
+  }
+
+  // Softer/dashed rather than the solid focus outline above -- this row
+  // isn't itself focused right now (focus is on the menu), so the outline
+  // should read as "this row owns the open menu," not as an identical
+  // stand-in for real focus. Declared after the rule above so it wins on
+  // the brief overlap where a row is still focused right as its menu opens.
+  &[data-tree-row-menu-open="true"] {
+    outline: 1px dashed var(--primary);
     outline-offset: -2px;
   }
 

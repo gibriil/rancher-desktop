@@ -1,4 +1,23 @@
-import { ancestorPathsOf, generateRequestId, highlightSegments } from '../containerFilesHelpers';
+import type { ContainerDirectoryEntry } from '@pkg/backend/containerClient/fileTypes';
+
+import {
+  ancestorPathsOf, generateRequestId, highlightSegments, isDownloadableEntry, isInertEntry, relativeContainerPath,
+} from '../containerFilesHelpers';
+
+function entry(overrides: Partial<ContainerDirectoryEntry>): ContainerDirectoryEntry {
+  return {
+    name:               'name',
+    path:               '/name',
+    kind:               'file',
+    size:               0,
+    mode:               'rw-r--r--',
+    mtime:              null,
+    symlinkTarget:      null,
+    symlinkEscapesRoot: false,
+    permissionDenied:   false,
+    ...overrides,
+  };
+}
 
 describe('generateRequestId', () => {
   it('produces a non-empty string', () => {
@@ -65,5 +84,51 @@ describe('highlightSegments', () => {
 
   it('returns no matches when the term does not appear', () => {
     expect(highlightSegments('config.yaml', 'zzz')).toEqual([{ text: 'config.yaml', matched: false }]);
+  });
+});
+
+describe('relativeContainerPath', () => {
+  it('strips the leading slash from an absolute container path', () => {
+    expect(relativeContainerPath('/etc/hosts')).toEqual('etc/hosts');
+  });
+
+  it('leaves the root path as an empty string', () => {
+    expect(relativeContainerPath('/')).toEqual('');
+  });
+});
+
+describe('isInertEntry', () => {
+  it('is true for a symlink whose target escapes the container root', () => {
+    expect(isInertEntry(entry({ kind: 'symlink', symlinkEscapesRoot: true }))).toBe(true);
+  });
+
+  it('is false for a symlink whose target stays inside the container root', () => {
+    expect(isInertEntry(entry({ kind: 'symlink', symlinkEscapesRoot: false }))).toBe(false);
+  });
+
+  it('is false for a regular file', () => {
+    expect(isInertEntry(entry({ kind: 'file' }))).toBe(false);
+  });
+});
+
+describe('isDownloadableEntry', () => {
+  it('is true for a regular file', () => {
+    expect(isDownloadableEntry(entry({ kind: 'file' }))).toBe(true);
+  });
+
+  it('is true for a symlink that stays inside the container root', () => {
+    expect(isDownloadableEntry(entry({ kind: 'symlink', symlinkEscapesRoot: false }))).toBe(true);
+  });
+
+  it('is false for an inert (escaping) symlink', () => {
+    expect(isDownloadableEntry(entry({ kind: 'symlink', symlinkEscapesRoot: true }))).toBe(false);
+  });
+
+  it('is false for a directory', () => {
+    expect(isDownloadableEntry(entry({ kind: 'directory' }))).toBe(false);
+  });
+
+  it('is false for other filesystem entry kinds (sockets, FIFOs, devices)', () => {
+    expect(isDownloadableEntry(entry({ kind: 'other' }))).toBe(false);
   });
 });

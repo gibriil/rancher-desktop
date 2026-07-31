@@ -186,8 +186,10 @@
 
 <script lang="ts">
 import { BadgeState, Banner } from '@rancher/components';
+import { clipboard } from 'electron';
 import debounce from 'lodash/debounce';
 import { defineComponent } from 'vue';
+import { mapGetters } from 'vuex';
 
 import type {
   ContainerDiffEntry, ContainerDirectoryEntry, ContainerDirectoryListing, ContainerFilePreview,
@@ -196,7 +198,9 @@ import type {
 import ContainerFileSearch from '@pkg/components/ContainerFileSearch.vue';
 import ContainerFileTreeNode from '@pkg/components/ContainerFileTreeNode.vue';
 import LoadingIndicator from '@pkg/components/LoadingIndicator.vue';
-import { ancestorPathsOf, generateRequestId, highlightSegments } from '@pkg/components/containerFilesHelpers';
+import {
+  ancestorPathsOf, generateRequestId, highlightSegments, isDownloadableEntry, relativeContainerPath,
+} from '@pkg/components/containerFilesHelpers';
 import { ipcRenderer } from '@pkg/utils/ipcRenderer';
 
 /**
@@ -229,6 +233,20 @@ export interface TreeContext {
   decorate:             (entry: ContainerDirectoryEntry) => { diffStatus: ContainerDiffEntry['status'] | null, mountInfo: ContainerMountInfo | null };
   onToggleDir:          (dirPath: string) => void;
   onSelectFile:         (entry: ContainerDirectoryEntry) => void;
+  /** Builds the `resources` entry ActionMenu.vue's `action-menu` store consumes for this row's right-click/keyboard menu. */
+  menuResourceFor:      (entry: ContainerDirectoryEntry) => Record<string, unknown>;
+  /**
+   * The row that currently holds real DOM focus, and the row whose context
+   * menu is currently open -- tracked as explicit state here (rather than
+   * relying solely on :focus-visible) because opening the menu moves actual
+   * DOM focus off the row and onto a menu item, which would otherwise drop
+   * the row's focus indicator for as long as the menu stays open.
+   */
+  focusedPath:          string | null;
+  menuOpenPath:         string | null;
+  onRowFocus:           (path: string) => void;
+  onRowBlur:            (path: string) => void;
+  onMenuOpen:           (path: string) => void;
   formatSize:           (bytes: number | null) => string;
   formatDate:           (mtime: string | null) => string;
   getFileIcon:          (entry: ContainerDirectoryEntry) => string;
@@ -265,6 +283,9 @@ interface Data {
   previewError:              string | null;
   downloadMessage:           string | null;
   previewRequestId:          string | null;
+  // See TreeContext's own doc comment on focusedPath/menuOpenPath.
+  focusedPath:               string | null;
+  menuOpenPath:              string | null;
   // Instant local filter (over whatever's already loaded/expanded).
   searchInput:               string; // raw, updated every keystroke
   filterQuery:               string; // debounced copy that actually drives filtering
@@ -337,6 +358,8 @@ export default defineComponent({
       previewError:        null,
       downloadMessage:     null,
       previewRequestId:    null,
+      focusedPath:         null,
+      menuOpenPath:        null,
 
       searchInput:              '',
       filterQuery:              '',
@@ -361,6 +384,7 @@ export default defineComponent({
     }, 200);
   },
   computed: {
+    ...mapGetters({ isActionMenuShowing: 'action-menu/showing' }),
     rootNode(): TreeNode {
       return this.nodes['/'];
     },
@@ -409,6 +433,12 @@ export default defineComponent({
         decorate:             this.decorate,
         onToggleDir:          this.toggleDir,
         onSelectFile:         this.selectFile,
+        menuResourceFor:      this.menuResourceFor,
+        focusedPath:          this.focusedPath,
+        menuOpenPath:         this.menuOpenPath,
+        onRowFocus:           this.onRowFocus,
+        onRowBlur:            this.onRowBlur,
+        onMenuOpen:           this.onMenuOpen,
         formatSize:           this.formatSize,
         formatDate:           this.formatDate,
         getFileIcon:          this.getFileIcon,
@@ -438,6 +468,12 @@ export default defineComponent({
         this.clearSearch();
       } else {
         this.debouncedSetFilterQuery?.(neu);
+      }
+    },
+    /** The global action-menu closing is the only signal we get that a row's open menu is done -- nothing else calls back into this component when it's dismissed. */
+    isActionMenuShowing(showing: boolean) {
+      if (!showing) {
+        this.menuOpenPath = null;
       }
     },
   },
@@ -744,6 +780,64 @@ export default defineComponent({
     downloadFile(filePath: string) {
       this.downloadMessage = null;
       ipcRenderer.send('container-files/download', this.containerId, filePath);
+    },
+    /**
+     * The right-click/keyboard context menu's action set for one row --
+     * follows the same `availableActions` + bound-method-per-action shape
+     * Images.vue/Containers.vue already use for their own ActionMenu-driven
+     * row menus, so ActionMenu.vue and the `action-menu` store need no
+     * per-feature special-casing. A future delete/edit action is just
+     * another entry appended to this array plus another bound method here --
+     * no other file needs to change again for that.
+     */
+    menuResourceFor(entry: ContainerDirectoryEntry): Record<string, unknown> {
+      return {
+        availableActions: [
+          {
+            label:   this.t('containerFiles.contextMenu.copyRelativePath'),
+            action:  'copyRelativePath',
+            enabled: true,
+            icon:    'icon icon-copy',
+          },
+          {
+            label:   this.t('containerFiles.contextMenu.download'),
+            action:  'downloadEntry',
+            enabled: isDownloadableEntry(entry),
+            icon:    'icon icon-download',
+          },
+        ],
+        copyRelativePath: () => this.copyRelativePath(entry.path),
+        downloadEntry:    () => this.downloadEntryFromMenu(entry),
+      };
+    },
+    onRowFocus(path: string) {
+      this.focusedPath = path;
+    },
+    onRowBlur(path: string) {
+      // Guard on a match rather than unconditionally clearing: harmless in
+      // the normal case (a blur is always immediately followed by the next
+      // row's own focus, if any), but avoids a newer row's focus being
+      // clobbered by an out-of-order/stale blur from an older one.
+      if (this.focusedPath === path) {
+        this.focusedPath = null;
+      }
+    },
+    onMenuOpen(path: string) {
+      this.menuOpenPath = path;
+    },
+    copyRelativePath(path: string) {
+      clipboard.writeText(relativeContainerPath(path));
+    },
+    /**
+     * Downloads a file from the context menu, even when it isn't the one
+     * currently open in the preview pane -- selectFile() first so
+     * selectedPath matches, since onDownloadDone/onDownloadError's staleness
+     * check (isStaleSelection) is keyed on selectedPath and would otherwise
+     * silently drop this download's success/error feedback.
+     */
+    downloadEntryFromMenu(entry: ContainerDirectoryEntry) {
+      this.selectFile(entry);
+      this.downloadFile(entry.path);
     },
     onDownloadDone(_event: unknown, containerId: string, filePath: string, hostPath: string) {
       if (this.isStaleSelection(containerId, filePath)) return;

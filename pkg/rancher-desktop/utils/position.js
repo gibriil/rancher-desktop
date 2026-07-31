@@ -123,9 +123,12 @@ export function fitOnScreen(contentElem, triggerElemOrEvent, opt, useDefaults) {
 
   if ( positionX === AUTO ) {
     positionX = gapIf.left < 0 || gapIf.right * 1.5 > gapIf.left ? RIGHT : LEFT;
-  } else if ( positionY === LEFT && gapIf.left < 0 ) {
+  } else if ( positionX === LEFT && gapIf.left < 0 ) {
+    // An explicitly-requested LEFT would run off the right edge of the
+    // screen -- flip to the other side instead of rendering off-screen.
     positionX = RIGHT;
-  } else if ( positionY === RIGHT && gapIf.right < 0 ) {
+  } else if ( positionX === RIGHT && gapIf.right < 0 ) {
+    // Same, flipped: an explicitly-requested RIGHT would run off the left edge.
     positionX = LEFT;
   }
 

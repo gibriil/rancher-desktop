@@ -888,6 +888,10 @@ containerFiles:
   download: Download
   downloadDone: 'Downloaded to {path}'
   downloadError: 'Download failed: {error}'
+  # @context Right-click/keyboard context menu entries for a row in the file tree
+  contextMenu:
+    copyRelativePath: Copy Relative Path
+    download: Save/Download
   # @context Badge shown next to a file that differs from the container's image
   diff:
     added: Added
