@@ -1,5 +1,5 @@
 <template>
-  <div class="container-files-component">
+  <div :class="{ 'container-files-component': true, resizing: resizingPreviewPane }">
     <banner
       v-if="capabilitiesError"
       class="content-state"
@@ -81,7 +81,10 @@
         {{ t('containerFiles.search.truncated', { shown: fullSearchMatches.length }) }}
       </banner>
 
-      <div class="file-panel">
+      <div
+        ref="filePanel"
+        class="file-panel"
+      >
         <div class="tree-header">
           <span class="tree-header-primary">{{ t('containerFiles.table.header.name') }}</span>
           <span class="tree-header-meta">
@@ -121,65 +124,84 @@
         </div>
       </div>
 
-      <div
-        v-if="selectedPath"
-        class="preview-pane"
-        data-testid="file-preview"
-      >
-        <div class="preview-header">
-          <span class="preview-path">{{ selectedPath }}</span>
-          <button
-            class="btn btn-sm role-tertiary"
-            :aria-label="t('generic.close')"
-            data-testid="preview-close"
-            @click="closePreview"
-          >
-            <i class="icon icon-close" />
-          </button>
-        </div>
-
-        <loading-indicator v-if="previewLoading">
-          {{ t('containerFiles.previewLoading') }}
-        </loading-indicator>
-
-        <banner
-          v-else-if="previewError"
-          color="error"
-        >
-          {{ previewError }}
-        </banner>
-
-        <template v-else-if="preview">
-          <banner
-            v-if="preview.kind === 'too-large' || preview.kind === 'binary'"
-            color="info"
-            data-testid="preview-download-only"
-          >
-            <span>{{
-              preview.kind === 'too-large'
-                ? t('containerFiles.tooLarge', { size: formatSize(preview.totalSize) })
-                : t('containerFiles.binaryFile')
-            }}</span>
-            <button
-              class="btn btn-sm role-primary download-btn"
-              @click="downloadFile(selectedPath)"
-            >
-              {{ t('containerFiles.download') }}
-            </button>
-          </banner>
-          <pre
-            v-else
-            class="preview-content"
-          >{{ preview.content }}</pre>
-        </template>
+      <template v-if="selectedPath">
+        <div
+          ref="resizeHandle"
+          class="resize-handle"
+          role="separator"
+          aria-orientation="horizontal"
+          :aria-label="t('containerFiles.resizeHandle.ariaLabel')"
+          :aria-valuenow="Math.round(paneBounds().current)"
+          :aria-valuemin="Math.round(paneBounds().min)"
+          :aria-valuemax="Math.round(paneBounds().max)"
+          tabindex="0"
+          data-testid="preview-resize-handle"
+          @mousedown="startResize"
+          @dblclick="resetPaneHeight"
+          @keydown="onHandleKeydown"
+        />
 
         <div
-          v-if="downloadMessage"
-          class="download-message"
+          ref="previewPane"
+          class="preview-pane"
+          data-testid="file-preview"
+          :style="previewPaneHeight ? { height: `${previewPaneHeight}px`, maxHeight: 'none' } : undefined"
         >
-          {{ downloadMessage }}
+          <div class="preview-header">
+            <span class="preview-path">{{ selectedPath }}</span>
+            <button
+              class="btn btn-sm role-tertiary preview-close-btn"
+              :aria-label="t('generic.close')"
+              data-testid="preview-close"
+              @click="closePreview"
+            >
+              <i class="icon icon-close" />
+            </button>
+          </div>
+
+          <loading-indicator v-if="previewLoading">
+            {{ t('containerFiles.previewLoading') }}
+          </loading-indicator>
+
+          <banner
+            v-else-if="previewError"
+            color="error"
+          >
+            {{ previewError }}
+          </banner>
+
+          <template v-else-if="preview">
+            <banner
+              v-if="preview.kind === 'too-large' || preview.kind === 'binary'"
+              color="info"
+              data-testid="preview-download-only"
+            >
+              <span>{{
+                preview.kind === 'too-large'
+                  ? t('containerFiles.tooLarge', { size: formatSize(preview.totalSize) })
+                  : t('containerFiles.binaryFile')
+              }}</span>
+              <button
+                class="btn btn-sm role-primary download-btn"
+                @click="downloadFile(selectedPath)"
+              >
+                {{ t('containerFiles.download') }}
+              </button>
+            </banner>
+            <pre
+              v-else
+              class="preview-content"
+            >{{ preview.content }}</pre>
+          </template>
+
+          <div
+            v-if="downloadMessage"
+            class="download-message"
+          >
+            {{ downloadMessage }}
+          </div>
         </div>
-      </div>
+      </template>
     </template>
   </div>
 </template>
@@ -199,7 +221,8 @@ import ContainerFileSearch from '@pkg/components/ContainerFileSearch.vue';
 import ContainerFileTreeNode from '@pkg/components/ContainerFileTreeNode.vue';
 import LoadingIndicator from '@pkg/components/LoadingIndicator.vue';
 import {
-  ancestorPathsOf, generateRequestId, highlightSegments, isDownloadableEntry, relativeContainerPath,
+  ancestorPathsOf, clampPaneHeight, generateRequestId, highlightSegments, isDownloadableEntry,
+  MIN_PANE_HEIGHT, MIN_TREE_HEIGHT_FRACTION, relativeContainerPath, resizedPaneHeight,
 } from '@pkg/components/containerFilesHelpers';
 import { ipcRenderer } from '@pkg/utils/ipcRenderer';
 
@@ -283,6 +306,24 @@ interface Data {
   previewError:              string | null;
   downloadMessage:           string | null;
   previewRequestId:          string | null;
+  // The preview pane's user-chosen height in px, set by dragging/keying the
+  // resize handle -- null means "untouched", falling back to the default
+  // CSS max-height: 40% auto-sizing. Deliberately never reset by
+  // closePreview()/selectFile()/resetAndOpen(): once chosen, it's a layout
+  // preference that should survive selection changes and container switches
+  // for the rest of the session, not per-file/per-container state.
+  previewPaneHeight:         number | null;
+  // Set only while a mouse drag of the resize handle is in progress -- drives
+  // a CSS class that suppresses text selection/sets the drag cursor for the
+  // whole component, since the mouse moves over arbitrary content mid-drag.
+  resizingPreviewPane:       boolean;
+  // The pointer Y and pane height a mouse drag started from, plus the max
+  // height that drag is allowed to reach -- captured once at mousedown
+  // (paneBounds() is a live DOM measurement, too expensive/jittery to redo
+  // on every mousemove) and reused for the whole drag.
+  dragStartY:                number;
+  dragStartHeight:           number;
+  dragMaxHeight:             number;
   // See TreeContext's own doc comment on focusedPath/menuOpenPath.
   focusedPath:               string | null;
   menuOpenPath:              string | null;
@@ -358,6 +399,11 @@ export default defineComponent({
       previewError:        null,
       downloadMessage:     null,
       previewRequestId:    null,
+      previewPaneHeight:   null,
+      resizingPreviewPane: false,
+      dragStartY:          0,
+      dragStartHeight:     0,
+      dragMaxHeight:       0,
       focusedPath:         null,
       menuOpenPath:        null,
 
@@ -497,6 +543,8 @@ export default defineComponent({
     this.openSession();
   },
   beforeUnmount() {
+    window.removeEventListener('mousemove', this.onResizeMove);
+    window.removeEventListener('mouseup', this.onResizeEnd);
     ipcRenderer.send('container-files/close', this.containerId);
     ipcRenderer.removeAllListeners('container-files/capabilities');
     ipcRenderer.removeAllListeners('container-files/capabilities-error');
@@ -780,6 +828,83 @@ export default defineComponent({
     downloadFile(filePath: string) {
       this.downloadMessage = null;
       ipcRenderer.send('container-files/download', this.containerId, filePath);
+    },
+    /**
+     * The preview pane's current/min/max height, in px, measured live from
+     * the DOM -- `max` is derived from how much combined space the tree and
+     * preview panes actually have right now (so it adapts to window size),
+     * leaving the tree only its proportional floor (MIN_TREE_HEIGHT_FRACTION
+     * of that combined space) rather than a fixed px minimum, which left the
+     * tree very little room to shrink into. Falls back to sane defaults if
+     * called before the panes have mounted (the template calls this once
+     * per render for the handle's aria-value* attributes, which can happen
+     * before $refs are populated).
+     */
+    paneBounds(): { current: number, min: number, max: number } {
+      const previewPane = this.$refs.previewPane as HTMLElement | undefined;
+      const filePanel = this.$refs.filePanel as HTMLElement | undefined;
+
+      if (!previewPane || !filePanel) {
+        return { current: this.previewPaneHeight ?? MIN_PANE_HEIGHT, min: MIN_PANE_HEIGHT, max: MIN_PANE_HEIGHT };
+      }
+      const current = previewPane.getBoundingClientRect().height;
+      const combined = current + filePanel.getBoundingClientRect().height;
+      const treeMinHeight = combined * MIN_TREE_HEIGHT_FRACTION;
+
+      return { current, min: MIN_PANE_HEIGHT, max: Math.max(MIN_PANE_HEIGHT, combined - treeMinHeight) };
+    },
+    startResize(event: MouseEvent) {
+      const { current, max } = this.paneBounds();
+
+      this.resizingPreviewPane = true;
+      this.dragStartY = event.clientY;
+      this.dragStartHeight = current;
+      this.dragMaxHeight = max;
+      window.addEventListener('mousemove', this.onResizeMove);
+      window.addEventListener('mouseup', this.onResizeEnd);
+    },
+    onResizeMove(event: MouseEvent) {
+      this.previewPaneHeight = resizedPaneHeight(
+        this.dragStartHeight, event.clientY - this.dragStartY, MIN_PANE_HEIGHT, this.dragMaxHeight,
+      );
+    },
+    onResizeEnd() {
+      this.resizingPreviewPane = false;
+      window.removeEventListener('mousemove', this.onResizeMove);
+      window.removeEventListener('mouseup', this.onResizeEnd);
+    },
+    /** Double-clicking the handle resets to the default auto-sized (max-height: 40%) behavior. */
+    resetPaneHeight() {
+      this.previewPaneHeight = null;
+    },
+    /**
+     * ArrowUp/ArrowDown resize by a step (larger with Shift); Home/End jump
+     * straight to the min/max -- the WAI-ARIA "separator" widget's standard
+     * keyboard interaction, since this handle has no native/mouse-only
+     * equivalent otherwise reachable from the keyboard.
+     */
+    onHandleKeydown(event: KeyboardEvent) {
+      const { current, min, max } = this.paneBounds();
+      const step = event.shiftKey ? 96 : 24;
+
+      switch (event.key) {
+      case 'ArrowUp':
+        event.preventDefault();
+        this.previewPaneHeight = clampPaneHeight(current + step, min, max);
+        break;
+      case 'ArrowDown':
+        event.preventDefault();
+        this.previewPaneHeight = clampPaneHeight(current - step, min, max);
+        break;
+      case 'Home':
+        event.preventDefault();
+        this.previewPaneHeight = min;
+        break;
+      case 'End':
+        event.preventDefault();
+        this.previewPaneHeight = max;
+        break;
+      }
     },
     /**
      * The right-click/keyboard context menu's action set for one row --
@@ -1093,10 +1218,64 @@ export default defineComponent({
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  // A coarse visual floor for the same edge case paneBounds()' JS clamp
+  // handles during an actual drag/keypress (e.g. a window resize while a
+  // large explicit preview-pane height is still set) -- deliberately just a
+  // small fixed px value, not the real MIN_TREE_HEIGHT_FRACTION (20%) floor
+  // itself: a CSS percentage min-height here would resolve against this
+  // component's own total height (including the header/banners above these
+  // two panes), not the space actually shared between the tree and preview
+  // panes, so it wouldn't match what the JS clamp is actually enforcing.
+  min-height: 60px;
   border: 1px solid var(--border);
   border-radius: var(--border-radius);
   overflow: hidden;
+}
+
+// Sits between .file-panel and .preview-pane, only rendered while the
+// preview pane is open -- a WAI-ARIA "separator" widget, not a native form
+// control, so its own focus/hover treatment is hand-rolled here to match
+// this feature's established focus-outline convention (ContainerFileTreeNode
+// .vue's tree rows).
+.resize-handle {
+  flex-shrink: 0;
+  height: 8px;
+  margin: -4px 0;
+  cursor: row-resize;
+  position: relative;
+  z-index: 1;
+
+  &::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 50%;
+    width: 32px;
+    height: 2px;
+    background: var(--border);
+    border-radius: 1px;
+    transform: translateX(-50%);
+  }
+
+  &:hover::after,
+  &:focus-visible::after {
+    background: var(--primary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+  }
+}
+
+// While actively dragging the handle, the pointer may move over the tree,
+// the preview text, or outside the component entirely -- suppressing text
+// selection here (rather than only on .resize-handle, which the pointer
+// isn't over for most of the drag) keeps a fast drag from also selecting
+// whatever content it passes over.
+.resizing {
+  user-select: none;
+  cursor: row-resize;
 }
 
 // Sits above the scrolling .file-tree, outside its overflow:auto area, so
@@ -1157,13 +1336,34 @@ export default defineComponent({
 
 .preview-pane {
   flex-shrink: 0;
+  // Only the *default* (unresized) ceiling -- once previewPaneHeight is set,
+  // the template overrides this to `none` via inline style so the explicit
+  // height (already bounded by paneBounds().max, the real available-space
+  // limit) actually governs. Left in place unconditionally, this static 40%
+  // would silently cap every resize at 40% regardless of what height gets
+  // set -- a real bug found and fixed after this looked like it was doing
+  // nothing.
   max-height: 40%;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
   border-radius: var(--border-radius);
   overflow: hidden;
-  min-height: 0;
+  // A visual floor complementing paneBounds()'s own MIN_PANE_HEIGHT JS clamp
+  // -- see .file-panel's own min-height comment above.
+  min-height: 120px;
+}
+
+// The global .btn/.btn-sm rules (assets/styles/global/_button.scss) center
+// icon-only content via padding + line-height, which works for a baseline-
+// aligned glyph but leaves an icon font's own glyph-box asymmetry (the "X"
+// visibly sits left-of-center) uncorrected -- centering the icon as a flex
+// child instead centers its actual box within the button, independent of
+// the icon font's internal metrics.
+.preview-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .preview-header {

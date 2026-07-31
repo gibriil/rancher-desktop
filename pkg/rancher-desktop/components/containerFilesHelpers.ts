@@ -91,3 +91,36 @@ export function isInertEntry(entry: ContainerDirectoryEntry): boolean {
 export function isDownloadableEntry(entry: ContainerDirectoryEntry): boolean {
   return !isInertEntry(entry) && (entry.kind === 'file' || entry.kind === 'symlink');
 }
+
+/** The preview pane can't be dragged/keyed below this height, in px -- a small file viewer is still usable; a sliver of one isn't. */
+export const MIN_PANE_HEIGHT = 120;
+
+/**
+ * The file tree's floor is proportional, not a fixed px value like the
+ * preview pane's -- a fixed px minimum left very little room for the
+ * preview to actually grow into on a typical window size, which was the
+ * whole point of this drag handle. 20% of the combined tree+preview space
+ * keeps the tree from disappearing while still giving the preview most of
+ * the room when dragged to its own extreme.
+ */
+export const MIN_TREE_HEIGHT_FRACTION = 0.2;
+
+/**
+ * Keeps a dragged/keyed pane height within bounds -- `max` is always derived
+ * from the *currently measured* space available (see resizedPaneHeight's own
+ * doc comment), not a fixed constant, so this stays correct across window
+ * sizes rather than baking in one screen size's assumption.
+ */
+export function clampPaneHeight(height: number, min: number, max: number): number {
+  return Math.min(Math.max(height, min), Math.max(min, max));
+}
+
+/**
+ * The preview pane's new height for a mouse-drag of `deltaY` px from
+ * `startHeight` -- dragging the handle down (positive deltaY) shrinks the
+ * preview pane (it hands that space to the tree above it), matching the
+ * handle sitting at the *top* edge of the preview pane.
+ */
+export function resizedPaneHeight(startHeight: number, deltaY: number, min: number, max: number): number {
+  return clampPaneHeight(startHeight - deltaY, min, max);
+}

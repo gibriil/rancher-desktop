@@ -1,7 +1,8 @@
 import type { ContainerDirectoryEntry } from '@pkg/backend/containerClient/fileTypes';
 
 import {
-  ancestorPathsOf, generateRequestId, highlightSegments, isDownloadableEntry, isInertEntry, relativeContainerPath,
+  ancestorPathsOf, clampPaneHeight, generateRequestId, highlightSegments, isDownloadableEntry, isInertEntry,
+  relativeContainerPath, resizedPaneHeight,
 } from '../containerFilesHelpers';
 
 function entry(overrides: Partial<ContainerDirectoryEntry>): ContainerDirectoryEntry {
@@ -108,6 +109,42 @@ describe('isInertEntry', () => {
 
   it('is false for a regular file', () => {
     expect(isInertEntry(entry({ kind: 'file' }))).toBe(false);
+  });
+});
+
+describe('clampPaneHeight', () => {
+  it('leaves a value already within bounds unchanged', () => {
+    expect(clampPaneHeight(200, 120, 400)).toEqual(200);
+  });
+
+  it('raises a value below the minimum up to the minimum', () => {
+    expect(clampPaneHeight(50, 120, 400)).toEqual(120);
+  });
+
+  it('lowers a value above the maximum down to the maximum', () => {
+    expect(clampPaneHeight(500, 120, 400)).toEqual(400);
+  });
+
+  it('prefers the minimum when the available space is too small to fit it', () => {
+    expect(clampPaneHeight(200, 120, 100)).toEqual(120);
+  });
+});
+
+describe('resizedPaneHeight', () => {
+  it('shrinks the pane when the handle is dragged down (positive deltaY)', () => {
+    expect(resizedPaneHeight(300, 50, 120, 600)).toEqual(250);
+  });
+
+  it('grows the pane when the handle is dragged up (negative deltaY)', () => {
+    expect(resizedPaneHeight(300, -50, 120, 600)).toEqual(350);
+  });
+
+  it('clamps the result to the minimum', () => {
+    expect(resizedPaneHeight(150, 100, 120, 600)).toEqual(120);
+  });
+
+  it('clamps the result to the maximum', () => {
+    expect(resizedPaneHeight(300, -400, 120, 600)).toEqual(600);
   });
 });
 

@@ -892,6 +892,9 @@ containerFiles:
   contextMenu:
     copyRelativePath: Copy Relative Path
     download: Save/Download
+  # @context Accessible label for the draggable divider that resizes the file preview pane
+  resizeHandle:
+    ariaLabel: Resize the file preview pane
   # @context Badge shown next to a file that differs from the container's image
   diff:
     added: Added
