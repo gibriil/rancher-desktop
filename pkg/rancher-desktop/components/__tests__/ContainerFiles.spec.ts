@@ -1,8 +1,8 @@
 import type { ContainerDirectoryEntry } from '@pkg/backend/containerClient/fileTypes';
 
 import {
-  ancestorPathsOf, clampPaneHeight, generateRequestId, highlightSegments, isDownloadableEntry, isInertEntry,
-  relativeContainerPath, resizedPaneHeight,
+  ancestorPathsOf, clampPaneHeight, diffBadgeColor, formatDate, formatSize, generateRequestId, getFileIcon,
+  highlightSegments, isDownloadableEntry, isInertEntry, relativeContainerPath, resizedPaneHeight,
 } from '../containerFilesHelpers';
 
 function entry(overrides: Partial<ContainerDirectoryEntry>): ContainerDirectoryEntry {
@@ -145,6 +145,69 @@ describe('resizedPaneHeight', () => {
 
   it('clamps the result to the maximum', () => {
     expect(resizedPaneHeight(300, -400, 120, 600)).toEqual(600);
+  });
+});
+
+describe('getFileIcon', () => {
+  it('uses a folder icon for a directory', () => {
+    expect(getFileIcon(entry({ kind: 'directory' }))).toEqual('icon icon-folder');
+  });
+
+  it('uses an external-link icon for a symlink', () => {
+    expect(getFileIcon(entry({ kind: 'symlink' }))).toEqual('icon icon-external-link');
+  });
+
+  it('uses a file icon for anything else', () => {
+    expect(getFileIcon(entry({ kind: 'file' }))).toEqual('icon icon-file');
+    expect(getFileIcon(entry({ kind: 'other' }))).toEqual('icon icon-file');
+  });
+});
+
+describe('diffBadgeColor', () => {
+  it('maps added to a success color', () => {
+    expect(diffBadgeColor('added')).toEqual('bg-success');
+  });
+
+  it('maps changed to a warning color', () => {
+    expect(diffBadgeColor('changed')).toEqual('bg-warning');
+  });
+
+  it('maps deleted (and any other status) to a neutral color', () => {
+    expect(diffBadgeColor('deleted')).toEqual('bg-darker');
+  });
+});
+
+describe('formatSize', () => {
+  it('returns a placeholder for an unknown size', () => {
+    expect(formatSize(null)).toEqual('?');
+  });
+
+  it('formats zero bytes explicitly rather than as "0 B" rounding oddity', () => {
+    expect(formatSize(0)).toEqual('0 B');
+  });
+
+  it('stays in bytes below the KB boundary', () => {
+    expect(formatSize(512)).toEqual('512 B');
+  });
+
+  it('converts to KB at the 1024-byte boundary', () => {
+    expect(formatSize(1024)).toEqual('1 KB');
+  });
+
+  it('converts to MB at the 1024*1024-byte boundary, rounded to 2 decimal places', () => {
+    expect(formatSize(1024 * 1024 * 1.5)).toEqual('1.5 MB');
+  });
+});
+
+describe('formatDate', () => {
+  it('returns a placeholder for a null mtime', () => {
+    expect(formatDate(null)).toEqual('?');
+  });
+
+  it('formats a valid mtime using the locale date/time format', () => {
+    const mtime = '2024-01-15T10:30:00.000Z';
+
+    expect(formatDate(mtime)).toEqual(new Date(mtime).toLocaleString());
   });
 });
 

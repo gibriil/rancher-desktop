@@ -379,7 +379,7 @@ export async function readFilePreviewAt(
 
   if (totalSize > maxBytes) {
     return {
-      path: filePath, kind: 'too-large', encoding: null, content: null, truncated: true, totalSize, mimeGuess: null,
+      path: filePath, kind: 'too-large', encoding: null, content: null, truncated: true, totalSize,
     };
   }
 
@@ -390,12 +390,12 @@ export async function readFilePreviewAt(
 
   if (isBinary) {
     return {
-      path: filePath, kind: 'binary', encoding: 'base64', content: base64, truncated: false, totalSize, mimeGuess: null,
+      path: filePath, kind: 'binary', encoding: 'base64', content: base64, truncated: false, totalSize,
     };
   }
 
   return {
-    path: filePath, kind: 'text', encoding: 'utf-8', content: buf.toString('utf-8'), truncated: false, totalSize, mimeGuess: null,
+    path: filePath, kind: 'text', encoding: 'utf-8', content: buf.toString('utf-8'), truncated: false, totalSize,
   };
 }
 
@@ -514,8 +514,12 @@ done | head -n "$2"
   const truncated = lines.length > maxMatches;
   const parsed: ContainerSearchMatch[] = lines.map((line) => {
     const [relPath, kind] = line.split('\t');
+    // The script above only ever prints one of these four literal words, but
+    // `kind` is still a plain string as far as the type system knows --
+    // fall back to 'other' rather than blindly asserting it matches.
+    const validKind: ContainerFileKind = (kind === 'file' || kind === 'directory' || kind === 'symlink') ? kind : 'other';
 
-    return { path: `/${ relPath }`, kind: kind as ContainerFileKind };
+    return { path: `/${ relPath }`, kind: validKind };
   });
 
   // Sorted before truncating -- `find`'s traversal order is otherwise

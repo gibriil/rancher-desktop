@@ -77,8 +77,6 @@ export interface ContainerFilePreview {
   /** True when content was cut off before the end of the file. */
   truncated: boolean;
   totalSize: number;
-  /** Best-effort MIME type guess, or null if unknown. */
-  mimeGuess: string | null;
 }
 
 /** A single changed path, as reported by `docker diff` / `nerdctl diff`. */

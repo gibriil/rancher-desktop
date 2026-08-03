@@ -47,7 +47,7 @@ export function parseMountsOutput(stdout: string): ContainerMountInfo[] {
     return [];
   }
 
-  let raw: any[];
+  let raw: Record<string, unknown>[];
 
   try {
     raw = JSON.parse(trimmed);
@@ -63,7 +63,7 @@ export function parseMountsOutput(stdout: string): ContainerMountInfo[] {
     // `m` is trusted-external JSON (docker/nerdctl's own inspect output) --
     // guard against a malformed/null entry rather than assuming every
     // element is the object shape we expect.
-    .filter(m => typeof m === 'object' && m !== null && !IMPLICIT_MOUNT_DESTINATIONS.has(m.Destination))
+    .filter(m => typeof m === 'object' && m !== null && !IMPLICIT_MOUNT_DESTINATIONS.has(String(m.Destination)))
     .map(m => ({
       type:        String(m.Type ?? ''),
       source:      String(m.Source ?? ''),

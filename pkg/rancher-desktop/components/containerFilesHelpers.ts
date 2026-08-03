@@ -10,7 +10,7 @@
  * fighting that rather than working around it.
  */
 
-import type { ContainerDirectoryEntry } from '@pkg/backend/containerClient/fileTypes';
+import type { ContainerDiffEntry, ContainerDirectoryEntry } from '@pkg/backend/containerClient/fileTypes';
 
 /**
  * A locally-unique ID to correlate an IPC request with its response -- no
@@ -123,4 +123,36 @@ export function clampPaneHeight(height: number, min: number, max: number): numbe
  */
 export function resizedPaneHeight(startHeight: number, deltaY: number, min: number, max: number): number {
   return clampPaneHeight(startHeight - deltaY, min, max);
+}
+
+/** Icon class for a tree row, based on entry kind. */
+export function getFileIcon(entry: ContainerDirectoryEntry): string {
+  if (entry.kind === 'directory') return 'icon icon-folder';
+  if (entry.kind === 'symlink') return 'icon icon-external-link';
+
+  return 'icon icon-file';
+}
+
+/** BadgeState color for a `docker diff`/`nerdctl diff` status. */
+export function diffBadgeColor(status: ContainerDiffEntry['status']): string {
+  switch (status) {
+  case 'added': return 'bg-success';
+  case 'changed': return 'bg-warning';
+  default: return 'bg-darker';
+  }
+}
+
+/** Human-readable file size, e.g. "1.5 KB"; "?" for an unknown size. */
+export function formatSize(bytes: number | null): string {
+  if (bytes === null) return '?';
+  if (bytes === 0) return '0 B';
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+
+  return `${ Math.round((bytes / Math.pow(1024, i)) * 100) / 100 } ${ sizes[i] }`;
+}
+
+/** Locale-formatted modification time; "?" when unknown. */
+export function formatDate(mtime: string | null): string {
+  return mtime ? new Date(mtime).toLocaleString() : '?';
 }

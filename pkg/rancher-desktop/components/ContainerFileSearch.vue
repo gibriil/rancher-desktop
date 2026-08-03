@@ -36,53 +36,40 @@
           class="match-count"
           data-testid="files-search-count"
         >{{ t('containerFiles.search.resultCount', { current: currentIndex + 1, total: matchCount }) }}</span>
-        <button
+        <icon-button
+          class="search-btn btn role-tertiary"
+          icon="icon icon-chevron-up"
           :disabled="matchCount < 2"
           :aria-label="t('containerFiles.search.previousMatch')"
-          class="search-btn btn role-tertiary"
-          data-testid="files-search-prev-btn"
-          :title="t('containerFiles.search.previousMatch')"
+          test-id="files-search-prev-btn"
           @click="$emit('previous')"
-        >
-          <i
-            aria-hidden="true"
-            class="icon icon-chevron-up"
-          />
-        </button>
-        <button
+        />
+        <icon-button
+          class="search-btn btn role-tertiary"
+          icon="icon icon-chevron-down"
           :disabled="matchCount < 2"
           :aria-label="t('containerFiles.search.nextMatch')"
-          class="search-btn btn role-tertiary"
-          data-testid="files-search-next-btn"
-          :title="t('containerFiles.search.nextMatch')"
+          test-id="files-search-next-btn"
           @click="$emit('next')"
-        >
-          <i
-            aria-hidden="true"
-            class="icon icon-chevron-down"
-          />
-        </button>
+        />
       </template>
     </template>
 
-    <button
+    <icon-button
+      class="search-btn btn role-tertiary"
+      icon="icon icon-search"
       :disabled="!modelValue"
       :aria-label="t('containerFiles.search.searchAll')"
-      class="search-btn btn role-tertiary"
-      data-testid="files-search-run"
-      :title="t('containerFiles.search.searchAll')"
+      test-id="files-search-run"
       @click="$emit('search')"
-    >
-      <i
-        aria-hidden="true"
-        class="icon icon-search"
-      />
-    </button>
+    />
   </div>
 </template>
 
 <script lang="ts">
 import { defineComponent } from 'vue';
+
+import IconButton from '@pkg/components/IconButton.vue';
 
 /**
  * Presentational search bar for the container Files tab: a raw text input
@@ -93,7 +80,8 @@ import { defineComponent } from 'vue';
  * actions upward; this component never touches `nodes` or IPC directly.
  */
 export default defineComponent({
-  name:  'container-file-search',
+  name:       'container-file-search',
+  components: { IconButton },
   props: {
     modelValue: {
       type:    String,
@@ -176,9 +164,6 @@ export default defineComponent({
   cursor: pointer;
   color: var(--body-text);
   transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   min-width: 32px;
   min-height: 32px;
 
@@ -197,9 +182,13 @@ export default defineComponent({
     outline: 2px solid var(--primary);
     outline-offset: -2px;
   }
+}
 
-  .icon {
-    font-size: 0.75rem;
-  }
+// IconButton.vue renders the actual <i> inside its own template, not this
+// component's -- a plain scoped ".search-btn .icon" selector can't reach past
+// that child-component boundary, so this needs :deep() to size the icon from
+// here rather than adding a one-off size prop to IconButton for a single caller.
+.search-btn :deep(.icon) {
+  font-size: 0.75rem;
 }
 </style>

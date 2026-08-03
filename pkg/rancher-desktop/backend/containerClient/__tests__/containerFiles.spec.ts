@@ -7,7 +7,7 @@ import {
   listDirectoryAt, resolveRegularFileAt, searchFilesAt, statPathAt,
 } from '@pkg/backend/containerClient/containerFsOps';
 import { parseDiffOutput, parseMountsOutput } from '@pkg/backend/containerClient/dockerFormatParsers';
-import { isRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
+import { isRuntimeFsRoot, resolveRuntimeFsRoot } from '@pkg/backend/containerClient/runtimeFsMount';
 
 describe('parseDiffOutput', () => {
   it('parses added/changed/deleted entries', () => {
@@ -217,6 +217,52 @@ describe('isRuntimeFsRoot', () => {
     expect(isRuntimeFsRoot('/proc/4242/root/etc')).toBe(false);
     expect(isRuntimeFsRoot('/mnt/proc/4242/root')).toBe(false);
     expect(isRuntimeFsRoot('/proc/not-a-pid/root')).toBe(false);
+  });
+});
+
+// resolveRuntimeFsRoot is the PID-reuse/container-ownership mitigation: before
+// /proc/<pid>/root is trusted as a live view of a container's filesystem, it
+// confirms the process at that pid still actually belongs to the claimed
+// container (via its cgroup path). Security-adjacent logic doesn't ship
+// without a test, same reasoning as resolveRegularFileAt below.
+describe('resolveRuntimeFsRoot', () => {
+  const CONTAINER_ID = 'abc123';
+
+  it('short-circuits to null for a non-integer or non-positive pid, without calling the VM', async() => {
+    const vm = { backend: 'lima', execCommand: jest.fn() } as unknown as VMExecutor;
+
+    expect(await resolveRuntimeFsRoot(vm, NaN, CONTAINER_ID)).toBeNull();
+    expect(await resolveRuntimeFsRoot(vm, 0, CONTAINER_ID)).toBeNull();
+    expect(await resolveRuntimeFsRoot(vm, -1, CONTAINER_ID)).toBeNull();
+    expect(await resolveRuntimeFsRoot(vm, 1.5, CONTAINER_ID)).toBeNull();
+    expect(vm.execCommand).not.toHaveBeenCalled();
+  });
+
+  it('returns the /proc/<pid>/root path when the process still belongs to the container', async() => {
+    const vm = {
+      backend:     'lima',
+      execCommand: jest.fn(() => Promise.resolve('yes\n')),
+    } as unknown as VMExecutor;
+
+    expect(await resolveRuntimeFsRoot(vm, 4242, CONTAINER_ID)).toEqual('/proc/4242/root');
+  });
+
+  it('returns null when the process no longer belongs to the container (a reused pid, or a stopped container)', async() => {
+    const vm = {
+      backend:     'lima',
+      execCommand: jest.fn(() => Promise.resolve('no\n')),
+    } as unknown as VMExecutor;
+
+    expect(await resolveRuntimeFsRoot(vm, 4242, CONTAINER_ID)).toBeNull();
+  });
+
+  it('returns null rather than throwing when the underlying command fails', async() => {
+    const vm = {
+      backend:     'lima',
+      execCommand: jest.fn(() => Promise.reject(new Error('exit status 1'))),
+    } as unknown as VMExecutor;
+
+    expect(await resolveRuntimeFsRoot(vm, 4242, CONTAINER_ID)).toBeNull();
   });
 });
 

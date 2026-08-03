@@ -92,6 +92,7 @@
                 v-if="entry.kind === 'symlink' && entry.symlinkEscapesRoot"
                 class="icon icon-alert symlink-warning"
                 :title="context.t('containerFiles.symlinkEscapesRoot')"
+                :aria-label="context.t('containerFiles.symlinkEscapesRoot')"
               />
               <badge-state
                 v-if="decorated(entry).diffStatus"

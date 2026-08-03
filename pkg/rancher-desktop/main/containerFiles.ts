@@ -69,6 +69,39 @@ function errorMessage(ex: unknown): string {
   return ex instanceof Error ? ex.message : String(ex);
 }
 
+/**
+ * Runs `op`, passing its result to `onResult` on success or the error
+ * message to `onError` on failure -- the try/withTimeout/catch/log shape
+ * every handler below needs identically (mount/list/stat/preview/search/
+ * diff/mounts/download all differ only in the actual sendToFrame call and,
+ * for search, a longer timeout), previously duplicated once per handler.
+ *
+ * Deliberately takes callbacks rather than a channel name + response args:
+ * an earlier version took the channel names directly and called
+ * `sendToFrame` from inside this generic helper, which meant the specific
+ * argument shape each channel declares in IpcRendererEvents could no longer
+ * be checked against what was actually sent -- only the channel *names*
+ * were still verified, not their payloads. Each call site's own
+ * `sendToFrame('channel', ...)` call below is a concrete, non-generic call,
+ * so it's checked exactly as strictly as it would be with no wrapper at all.
+ */
+async function respond<T>(
+  description: string,
+  op: () => Promise<T>,
+  onResult: (result: T) => void,
+  onError: (message: string) => void,
+  timeoutMs?: number,
+): Promise<void> {
+  try {
+    const result = await withTimeout(op(), description, timeoutMs);
+
+    onResult(result);
+  } catch (ex) {
+    console.error(`${ description } failed:`, ex);
+    onError(errorMessage(ex));
+  }
+}
+
 export class ContainerFilesHandler {
   protected sessions = new Map<string, FilesSession>(); // containerId -> session
 
@@ -116,40 +149,36 @@ export class ContainerFilesHandler {
 
       const sendToFrame = makeSendToFrame(event.sender, console);
 
-      withTimeout(this.client.getContainerFilesCapabilities(containerId, { namespace }), `Checking files support for ${ containerId }`)
-        .then(result => sendToFrame('container-files/capabilities', containerId, result))
-        .catch((ex) => {
-          console.error(`Failed to get files capabilities for ${ containerId }:`, ex);
-          sendToFrame('container-files/capabilities-error', containerId, errorMessage(ex));
-        });
+      respond(
+        `Checking files support for ${ containerId }`,
+        () => this.client.getContainerFilesCapabilities(containerId, { namespace }),
+        result => sendToFrame('container-files/capabilities', containerId, result),
+        message => sendToFrame('container-files/capabilities-error', containerId, message),
+      );
     });
 
     ipcMainProxy.on('container-files/diff', async(event, containerId) => {
       const sendToFrame = makeSendToFrame(event.sender, console);
       const namespace = this.sessions.get(containerId)?.namespace;
 
-      try {
-        const entries = await withTimeout(this.client.getContainerDiff(containerId, { namespace }), `Getting diff for ${ containerId }`);
-
-        sendToFrame('container-files/diff-result', containerId, entries);
-      } catch (ex) {
-        console.error(`Failed to get diff for ${ containerId }:`, ex);
-        sendToFrame('container-files/diff-error', containerId, errorMessage(ex));
-      }
+      await respond(
+        `Getting diff for ${ containerId }`,
+        () => this.client.getContainerDiff(containerId, { namespace }),
+        result => sendToFrame('container-files/diff-result', containerId, result),
+        message => sendToFrame('container-files/diff-error', containerId, message),
+      );
     });
 
     ipcMainProxy.on('container-files/mounts', async(event, containerId) => {
       const sendToFrame = makeSendToFrame(event.sender, console);
       const namespace = this.sessions.get(containerId)?.namespace;
 
-      try {
-        const mounts = await withTimeout(this.client.getContainerMounts(containerId, { namespace }), `Getting mounts for ${ containerId }`);
-
-        sendToFrame('container-files/mounts-result', containerId, mounts);
-      } catch (ex) {
-        console.error(`Failed to get mounts for ${ containerId }:`, ex);
-        sendToFrame('container-files/mounts-error', containerId, errorMessage(ex));
-      }
+      await respond(
+        `Getting mounts for ${ containerId }`,
+        () => this.client.getContainerMounts(containerId, { namespace }),
+        result => sendToFrame('container-files/mounts-result', containerId, result),
+        message => sendToFrame('container-files/mounts-error', containerId, message),
+      );
     });
 
     ipcMainProxy.on('container-files/close', (event, containerId) => {
@@ -160,60 +189,49 @@ export class ContainerFilesHandler {
       const sendToFrame = makeSendToFrame(event.sender, console);
       const namespace = this.sessions.get(containerId)?.namespace;
 
-      try {
-        const result = await withTimeout(this.client.listContainerDirectory(containerId, dirPath, { namespace }), `Listing ${ dirPath } in ${ containerId }`);
-
-        sendToFrame('container-files/list-result', requestId, containerId, result);
-      } catch (ex) {
-        console.error(`Failed to list ${ dirPath } in ${ containerId }:`, ex);
-        sendToFrame('container-files/list-error', requestId, containerId, errorMessage(ex));
-      }
+      await respond(
+        `Listing ${ dirPath } in ${ containerId }`,
+        () => this.client.listContainerDirectory(containerId, dirPath, { namespace }),
+        result => sendToFrame('container-files/list-result', requestId, containerId, result),
+        message => sendToFrame('container-files/list-error', requestId, containerId, message),
+      );
     });
 
     ipcMainProxy.on('container-files/stat', async(event, requestId, containerId, filePath) => {
       const sendToFrame = makeSendToFrame(event.sender, console);
       const namespace = this.sessions.get(containerId)?.namespace;
 
-      try {
-        const result = await withTimeout(this.client.statContainerPath(containerId, filePath, { namespace }), `Stat-ing ${ filePath } in ${ containerId }`);
-
-        sendToFrame('container-files/stat-result', requestId, containerId, result);
-      } catch (ex) {
-        console.error(`Failed to stat ${ filePath } in ${ containerId }:`, ex);
-        sendToFrame('container-files/stat-error', requestId, containerId, errorMessage(ex));
-      }
+      await respond(
+        `Stat-ing ${ filePath } in ${ containerId }`,
+        () => this.client.statContainerPath(containerId, filePath, { namespace }),
+        result => sendToFrame('container-files/stat-result', requestId, containerId, result),
+        message => sendToFrame('container-files/stat-error', requestId, containerId, message),
+      );
     });
 
     ipcMainProxy.on('container-files/preview', async(event, requestId, containerId, filePath) => {
       const sendToFrame = makeSendToFrame(event.sender, console);
       const namespace = this.sessions.get(containerId)?.namespace;
 
-      try {
-        const result = await withTimeout(this.client.readContainerFilePreview(containerId, filePath, { namespace }), `Reading ${ filePath } in ${ containerId }`);
-
-        sendToFrame('container-files/preview-result', requestId, containerId, result);
-      } catch (ex) {
-        console.error(`Failed to read ${ filePath } in ${ containerId }:`, ex);
-        sendToFrame('container-files/preview-error', requestId, containerId, errorMessage(ex));
-      }
+      await respond(
+        `Reading ${ filePath } in ${ containerId }`,
+        () => this.client.readContainerFilePreview(containerId, filePath, { namespace }),
+        result => sendToFrame('container-files/preview-result', requestId, containerId, result),
+        message => sendToFrame('container-files/preview-error', requestId, containerId, message),
+      );
     });
 
     ipcMainProxy.on('container-files/search', async(event, requestId, containerId, query) => {
       const sendToFrame = makeSendToFrame(event.sender, console);
       const namespace = this.sessions.get(containerId)?.namespace;
 
-      try {
-        const result = await withTimeout(
-          this.client.searchContainerFiles(containerId, query, { namespace }),
-          `Searching ${ containerId } for "${ query }"`,
-          SEARCH_TIMEOUT_MS,
-        );
-
-        sendToFrame('container-files/search-result', requestId, containerId, result);
-      } catch (ex) {
-        console.error(`Failed to search ${ containerId } for "${ query }":`, ex);
-        sendToFrame('container-files/search-error', requestId, containerId, errorMessage(ex));
-      }
+      await respond(
+        `Searching ${ containerId } for "${ query }"`,
+        () => this.client.searchContainerFiles(containerId, query, { namespace }),
+        result => sendToFrame('container-files/search-result', requestId, containerId, result),
+        message => sendToFrame('container-files/search-error', requestId, containerId, message),
+        SEARCH_TIMEOUT_MS,
+      );
     });
 
     ipcMainProxy.on('container-files/download', async(event, containerId, filePath) => {
@@ -233,13 +251,14 @@ export class ContainerFilesHandler {
           return;
         }
 
-        await withTimeout(
-          this.client.downloadContainerFile(containerId, filePath, destinationPath, { namespace }),
+        await respond(
           `Downloading ${ filePath } from ${ containerId }`,
+          () => this.client.downloadContainerFile(containerId, filePath, destinationPath, { namespace }),
+          () => sendToFrame('container-files/download-done', containerId, filePath, destinationPath),
+          message => sendToFrame('container-files/download-error', containerId, filePath, message),
         );
-        sendToFrame('container-files/download-done', containerId, filePath, destinationPath);
       } catch (ex) {
-        console.error(`Failed to download ${ filePath } from ${ containerId }:`, ex);
+        console.error(`Failed to show save dialog for ${ filePath } from ${ containerId }:`, ex);
         sendToFrame('container-files/download-error', containerId, filePath, errorMessage(ex));
       }
     });

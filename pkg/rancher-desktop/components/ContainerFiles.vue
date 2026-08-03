@@ -28,15 +28,14 @@
           class="state-indicator"
           data-testid="files-state-indicator"
         />
-        <button
-          class="btn btn-sm role-tertiary refresh-btn"
+        <icon-button
+          class="btn btn-sm role-tertiary"
+          :icon="anyLoading ? 'icon icon-spinner icon-spin' : 'icon icon-refresh'"
           :disabled="anyLoading"
           :aria-label="t('containerFiles.refresh')"
-          data-testid="files-refresh"
+          test-id="files-refresh"
           @click="refresh"
-        >
-          <i :class="anyLoading ? 'icon icon-spinner icon-spin' : 'icon icon-refresh'" />
-        </button>
+        />
         <container-file-search
           v-model="searchInput"
           :status="fullSearchStatus"
@@ -149,14 +148,13 @@
         >
           <div class="preview-header">
             <span class="preview-path">{{ selectedPath }}</span>
-            <button
-              class="btn btn-sm role-tertiary preview-close-btn"
+            <icon-button
+              class="btn btn-sm role-tertiary"
+              icon="icon icon-close"
               :aria-label="t('generic.close')"
-              data-testid="preview-close"
+              test-id="preview-close"
               @click="closePreview"
-            >
-              <i class="icon icon-close" />
-            </button>
+            />
           </div>
 
           <loading-indicator v-if="previewLoading">
@@ -209,39 +207,25 @@
 <script lang="ts">
 import { BadgeState, Banner } from '@rancher/components';
 import { clipboard } from 'electron';
-import debounce from 'lodash/debounce';
 import { defineComponent } from 'vue';
 import { mapGetters } from 'vuex';
 
 import type {
   ContainerDiffEntry, ContainerDirectoryEntry, ContainerDirectoryListing, ContainerFilePreview,
-  ContainerFilesCapabilities, ContainerMountInfo, ContainerSearchMatch, ContainerSearchResult,
+  ContainerFilesCapabilities, ContainerMountInfo,
 } from '@pkg/backend/containerClient/fileTypes';
 import ContainerFileSearch from '@pkg/components/ContainerFileSearch.vue';
 import ContainerFileTreeNode from '@pkg/components/ContainerFileTreeNode.vue';
+import IconButton from '@pkg/components/IconButton.vue';
 import LoadingIndicator from '@pkg/components/LoadingIndicator.vue';
 import {
-  ancestorPathsOf, clampPaneHeight, generateRequestId, highlightSegments, isDownloadableEntry,
-  MIN_PANE_HEIGHT, MIN_TREE_HEIGHT_FRACTION, relativeContainerPath, resizedPaneHeight,
+  diffBadgeColor, formatDate, formatSize, generateRequestId, getFileIcon, highlightSegments, isDownloadableEntry,
+  relativeContainerPath,
 } from '@pkg/components/containerFilesHelpers';
+import type { TreeNode } from '@pkg/components/containerFilesTypes';
+import fileSearchMixin from '@pkg/components/mixins/fileSearchMixin';
+import paneResizeMixin from '@pkg/components/mixins/paneResizeMixin';
 import { ipcRenderer } from '@pkg/utils/ipcRenderer';
-
-/**
- * One directory's worth of state.  Keyed by absolute path in `nodes` below --
- * a flat map instead of a nested structure so any node can be looked up,
- * created, or updated in O(1) regardless of how deep it is, and so several
- * nodes can be independently loading/expanded/truncated at once (a tree, as
- * opposed to the single "current directory" the old breadcrumb browser had).
- */
-export interface TreeNode {
-  entries:         ContainerDirectoryEntry[] | null; // null = never fetched
-  expanded:        boolean;
-  loading:         boolean;
-  error:           string | null;
-  truncated:       boolean;
-  totalEntryCount: number | null;
-  requestId:       string | null; // the list request this node is currently waiting on, if any
-}
 
 /**
  * The shape ContainerFileTreeNode.vue's `context` prop actually receives --
@@ -306,64 +290,20 @@ interface Data {
   previewError:              string | null;
   downloadMessage:           string | null;
   previewRequestId:          string | null;
-  // The preview pane's user-chosen height in px, set by dragging/keying the
-  // resize handle -- null means "untouched", falling back to the default
-  // CSS max-height: 40% auto-sizing. Deliberately never reset by
-  // closePreview()/selectFile()/resetAndOpen(): once chosen, it's a layout
-  // preference that should survive selection changes and container switches
-  // for the rest of the session, not per-file/per-container state.
-  previewPaneHeight:         number | null;
-  // Set only while a mouse drag of the resize handle is in progress -- drives
-  // a CSS class that suppresses text selection/sets the drag cursor for the
-  // whole component, since the mouse moves over arbitrary content mid-drag.
-  resizingPreviewPane:       boolean;
-  // The pointer Y and pane height a mouse drag started from, plus the max
-  // height that drag is allowed to reach -- captured once at mousedown
-  // (paneBounds() is a live DOM measurement, too expensive/jittery to redo
-  // on every mousemove) and reused for the whole drag.
-  dragStartY:                number;
-  dragStartHeight:           number;
-  dragMaxHeight:             number;
   // See TreeContext's own doc comment on focusedPath/menuOpenPath.
   focusedPath:               string | null;
   menuOpenPath:              string | null;
-  // Instant local filter (over whatever's already loaded/expanded).
-  searchInput:               string; // raw, updated every keystroke
-  filterQuery:               string; // debounced copy that actually drives filtering
-  debouncedSetFilterQuery:   ((value: string) => void) | null;
-  // On-demand full-filesystem search.
-  fullSearchStatus:          'idle' | 'searching' | 'done' | 'error';
-  fullSearchMatches:         ContainerSearchMatch[];
-  fullSearchTruncated:       boolean;
-  fullSearchTotalMatchCount: number | null;
-  fullSearchRequestId:       string | null;
-  fullSearchCurrentIndex:    number;
-  fullSearchError:           string | null;
-  highlightedMatchPath:      string | null;
-  // Indices into fullSearchMatches whose ancestors have finished being
-  // revealed (successfully or not) -- a Set, not a raw counter, so
-  // re-revealing an already-revealed match (e.g. navigating back to it)
-  // can't double-count it.
-  revealedMatchIndices:      Set<number>;
-  // Invalidates every in-flight ancestor-expand-and-reveal walk from the
-  // current search batch (e.g. a newer search superseding it, or a
-  // container reset) without needing to cancel the underlying promises
-  // they're awaiting -- shared across all matches' walks, unlike
-  // navigationSequence below.
-  expandWalkGeneration:      number;
-  // Invalidates only a specific in-flight jumpToMatch() call (e.g. rapid
-  // next/previous clicks), independent of the broader reveal-all-matches
-  // batch tracked by expandWalkGeneration.
-  navigationSequence:        number;
 }
 
 export default defineComponent({
-  name:       'container-files',
+  name:   'container-files',
+  mixins: [paneResizeMixin, fileSearchMixin],
   components: {
     BadgeState,
     Banner,
     ContainerFileSearch,
     ContainerFileTreeNode,
+    IconButton,
     LoadingIndicator,
   },
   props: {
@@ -399,35 +339,9 @@ export default defineComponent({
       previewError:        null,
       downloadMessage:     null,
       previewRequestId:    null,
-      previewPaneHeight:   null,
-      resizingPreviewPane: false,
-      dragStartY:          0,
-      dragStartHeight:     0,
-      dragMaxHeight:       0,
       focusedPath:         null,
       menuOpenPath:        null,
-
-      searchInput:              '',
-      filterQuery:              '',
-      debouncedSetFilterQuery:  null,
-
-      fullSearchStatus:          'idle',
-      fullSearchMatches:         [],
-      fullSearchTruncated:       false,
-      fullSearchTotalMatchCount: null,
-      fullSearchRequestId:       null,
-      fullSearchCurrentIndex:    0,
-      fullSearchError:           null,
-      highlightedMatchPath:      null,
-      revealedMatchIndices:      new Set(),
-      expandWalkGeneration:      0,
-      navigationSequence:        0,
     };
-  },
-  created() {
-    this.debouncedSetFilterQuery = debounce((value: string) => {
-      this.filterQuery = value;
-    }, 200);
   },
   computed: {
     ...mapGetters({ isActionMenuShowing: 'action-menu/showing' }),
@@ -455,17 +369,6 @@ export default defineComponent({
 
       return map;
     },
-    /** Lowercased once here rather than by every recursive tree node. */
-    filterTerm(): string {
-      return this.filterQuery.trim().toLowerCase();
-    },
-    /** True once a local filter is active and nothing loaded/expanded matches it anywhere. */
-    noLocalMatches(): boolean {
-      return this.filterTerm !== '' && !this.subtreeHasMatch('/', this.filterTerm);
-    },
-    revealedMatchCount(): number {
-      return this.revealedMatchIndices.size;
-    },
     /**
      * Bundled once and passed by reference to every level of the recursive
      * tree, rather than threading half a dozen individual props through
@@ -485,10 +388,10 @@ export default defineComponent({
         onRowFocus:           this.onRowFocus,
         onRowBlur:            this.onRowBlur,
         onMenuOpen:           this.onMenuOpen,
-        formatSize:           this.formatSize,
-        formatDate:           this.formatDate,
-        getFileIcon:          this.getFileIcon,
-        diffBadgeColor:       this.diffBadgeColor,
+        formatSize,
+        formatDate,
+        getFileIcon,
+        diffBadgeColor,
         filterTerm:           this.filterTerm,
         subtreeHasMatch:      this.subtreeHasMatch,
         highlightSegments,
@@ -505,17 +408,6 @@ export default defineComponent({
     containerId() {
       this.resetAndOpen();
     },
-    searchInput(neu: string) {
-      // Clearing the box -- whether by backspacing or the search input's own
-      // native "x" -- resets everything immediately, not just the (debounced)
-      // local filter; otherwise a stale full-search banner/highlight could
-      // outlive the query that produced it.
-      if (neu === '') {
-        this.clearSearch();
-      } else {
-        this.debouncedSetFilterQuery?.(neu);
-      }
-    },
     /** The global action-menu closing is the only signal we get that a row's open menu is done -- nothing else calls back into this component when it's dismissed. */
     isActionMenuShowing(showing: boolean) {
       if (!showing) {
@@ -530,8 +422,6 @@ export default defineComponent({
     ipcRenderer.on('container-files/list-error', this.onListError);
     ipcRenderer.on('container-files/preview-result', this.onPreviewResult);
     ipcRenderer.on('container-files/preview-error', this.onPreviewError);
-    ipcRenderer.on('container-files/search-result', this.onSearchResult);
-    ipcRenderer.on('container-files/search-error', this.onSearchError);
     ipcRenderer.on('container-files/diff-result', this.onDiffResult);
     ipcRenderer.on('container-files/diff-error', this.onDiffError);
     ipcRenderer.on('container-files/mounts-result', this.onMountsResult);
@@ -543,8 +433,6 @@ export default defineComponent({
     this.openSession();
   },
   beforeUnmount() {
-    window.removeEventListener('mousemove', this.onResizeMove);
-    window.removeEventListener('mouseup', this.onResizeEnd);
     ipcRenderer.send('container-files/close', this.containerId);
     ipcRenderer.removeAllListeners('container-files/capabilities');
     ipcRenderer.removeAllListeners('container-files/capabilities-error');
@@ -552,8 +440,6 @@ export default defineComponent({
     ipcRenderer.removeAllListeners('container-files/list-error');
     ipcRenderer.removeAllListeners('container-files/preview-result');
     ipcRenderer.removeAllListeners('container-files/preview-error');
-    ipcRenderer.removeAllListeners('container-files/search-result');
-    ipcRenderer.removeAllListeners('container-files/search-error');
     ipcRenderer.removeAllListeners('container-files/diff-result');
     ipcRenderer.removeAllListeners('container-files/diff-error');
     ipcRenderer.removeAllListeners('container-files/mounts-result');
@@ -830,83 +716,6 @@ export default defineComponent({
       ipcRenderer.send('container-files/download', this.containerId, filePath);
     },
     /**
-     * The preview pane's current/min/max height, in px, measured live from
-     * the DOM -- `max` is derived from how much combined space the tree and
-     * preview panes actually have right now (so it adapts to window size),
-     * leaving the tree only its proportional floor (MIN_TREE_HEIGHT_FRACTION
-     * of that combined space) rather than a fixed px minimum, which left the
-     * tree very little room to shrink into. Falls back to sane defaults if
-     * called before the panes have mounted (the template calls this once
-     * per render for the handle's aria-value* attributes, which can happen
-     * before $refs are populated).
-     */
-    paneBounds(): { current: number, min: number, max: number } {
-      const previewPane = this.$refs.previewPane as HTMLElement | undefined;
-      const filePanel = this.$refs.filePanel as HTMLElement | undefined;
-
-      if (!previewPane || !filePanel) {
-        return { current: this.previewPaneHeight ?? MIN_PANE_HEIGHT, min: MIN_PANE_HEIGHT, max: MIN_PANE_HEIGHT };
-      }
-      const current = previewPane.getBoundingClientRect().height;
-      const combined = current + filePanel.getBoundingClientRect().height;
-      const treeMinHeight = combined * MIN_TREE_HEIGHT_FRACTION;
-
-      return { current, min: MIN_PANE_HEIGHT, max: Math.max(MIN_PANE_HEIGHT, combined - treeMinHeight) };
-    },
-    startResize(event: MouseEvent) {
-      const { current, max } = this.paneBounds();
-
-      this.resizingPreviewPane = true;
-      this.dragStartY = event.clientY;
-      this.dragStartHeight = current;
-      this.dragMaxHeight = max;
-      window.addEventListener('mousemove', this.onResizeMove);
-      window.addEventListener('mouseup', this.onResizeEnd);
-    },
-    onResizeMove(event: MouseEvent) {
-      this.previewPaneHeight = resizedPaneHeight(
-        this.dragStartHeight, event.clientY - this.dragStartY, MIN_PANE_HEIGHT, this.dragMaxHeight,
-      );
-    },
-    onResizeEnd() {
-      this.resizingPreviewPane = false;
-      window.removeEventListener('mousemove', this.onResizeMove);
-      window.removeEventListener('mouseup', this.onResizeEnd);
-    },
-    /** Double-clicking the handle resets to the default auto-sized (max-height: 40%) behavior. */
-    resetPaneHeight() {
-      this.previewPaneHeight = null;
-    },
-    /**
-     * ArrowUp/ArrowDown resize by a step (larger with Shift); Home/End jump
-     * straight to the min/max -- the WAI-ARIA "separator" widget's standard
-     * keyboard interaction, since this handle has no native/mouse-only
-     * equivalent otherwise reachable from the keyboard.
-     */
-    onHandleKeydown(event: KeyboardEvent) {
-      const { current, min, max } = this.paneBounds();
-      const step = event.shiftKey ? 96 : 24;
-
-      switch (event.key) {
-      case 'ArrowUp':
-        event.preventDefault();
-        this.previewPaneHeight = clampPaneHeight(current + step, min, max);
-        break;
-      case 'ArrowDown':
-        event.preventDefault();
-        this.previewPaneHeight = clampPaneHeight(current - step, min, max);
-        break;
-      case 'Home':
-        event.preventDefault();
-        this.previewPaneHeight = min;
-        break;
-      case 'End':
-        event.preventDefault();
-        this.previewPaneHeight = max;
-        break;
-      }
-    },
-    /**
      * The right-click/keyboard context menu's action set for one row --
      * follows the same `availableActions` + bound-method-per-action shape
      * Images.vue/Containers.vue already use for their own ActionMenu-driven
@@ -972,194 +781,10 @@ export default defineComponent({
       if (this.isStaleSelection(containerId, filePath)) return;
       this.downloadMessage = this.t('containerFiles.downloadError', { error: message });
     },
-    getFileIcon(entry: ContainerDirectoryEntry): string {
-      if (entry.kind === 'directory') return 'icon icon-folder';
-      if (entry.kind === 'symlink') return 'icon icon-external-link';
-
-      return 'icon icon-file';
-    },
-    diffBadgeColor(status: ContainerDiffEntry['status']): string {
-      switch (status) {
-      case 'added': return 'bg-success';
-      case 'changed': return 'bg-warning';
-      default: return 'bg-darker';
-      }
-    },
-    formatSize(bytes: number | null): string {
-      if (bytes === null) return '?';
-      if (bytes === 0) return '0 B';
-      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-      const i = Math.floor(Math.log(bytes) / Math.log(1024));
-
-      return `${ Math.round((bytes / Math.pow(1024, i)) * 100) / 100 } ${ sizes[i] }`;
-    },
-    formatDate(mtime: string | null): string {
-      return mtime ? new Date(mtime).toLocaleString() : '?';
-    },
-    /**
-     * True if `dirPath` or anything in its already-loaded subtree matches
-     * `term` (case-insensitive substring on name). Recurses over any node
-     * with entries !== null regardless of its current `expanded` state, so
-     * collapsing a matched subdirectory doesn't hide its own row -- folders
-     * never opened aren't searched at all, by design.
-     */
-    subtreeHasMatch(dirPath: string, term: string): boolean {
-      const node = this.nodes[dirPath];
-
-      if (!node?.entries) return false;
-
-      return node.entries.some(entry => entry.name.toLowerCase().includes(term) ||
-        (entry.kind === 'directory' && this.subtreeHasMatch(entry.path, term)));
-    },
-    runFullSearch() {
-      const query = this.searchInput.trim();
-
-      if (!query) return;
-      // Invalidate any still-running reveal walk from a previous search
-      // immediately, even before this one's results arrive.
-      this.expandWalkGeneration++;
-      this.fullSearchStatus = 'searching';
-      this.fullSearchError = null;
-      this.fullSearchMatches = [];
-      this.fullSearchTruncated = false;
-      this.fullSearchTotalMatchCount = null;
-      this.fullSearchCurrentIndex = 0;
-      this.highlightedMatchPath = null;
-      this.revealedMatchIndices = new Set();
-      const requestId = generateRequestId();
-
-      this.fullSearchRequestId = requestId;
-      ipcRenderer.send('container-files/search', requestId, this.containerId, query);
-    },
-    onSearchResult(_event: unknown, requestId: string, containerId: string, result: ContainerSearchResult) {
-      if (this.isStaleSearch(containerId, requestId)) return;
-      this.fullSearchStatus = 'done';
-      this.fullSearchMatches = result.matches;
-      this.fullSearchTruncated = result.truncated;
-      this.fullSearchTotalMatchCount = result.totalMatchCount;
-      this.fullSearchCurrentIndex = 0;
-      if (result.matches.length > 0) {
-        this.jumpToMatch(0);
-        this.revealRemainingMatches(result.matches);
-      }
-    },
-    onSearchError(_event: unknown, requestId: string, containerId: string, message: string) {
-      if (this.isStaleSearch(containerId, requestId)) return;
-      this.fullSearchStatus = 'error';
-      this.fullSearchError = message;
-    },
-    searchNext() {
-      const matchCount = this.fullSearchMatches.length;
-
-      if (matchCount === 0) return;
-      this.jumpToMatch((this.fullSearchCurrentIndex + 1) % matchCount);
-    },
-    searchPrevious() {
-      const matchCount = this.fullSearchMatches.length;
-
-      if (matchCount === 0) return;
-      this.jumpToMatch((this.fullSearchCurrentIndex - 1 + matchCount) % matchCount);
-    },
-    /**
-     * Expands/loads every ancestor directory down to `path` (fetching any
-     * not yet loaded), without scrolling or highlighting anything -- the
-     * building block both jumpToMatch() and revealRemainingMatches() share.
-     * `generation` is a snapshot of expandWalkGeneration taken by the
-     * caller at the *batch's* start (a whole search, or a container reset)
-     * -- not bumped per-call -- so many of these can run concurrently for
-     * different matches from the same search without aborting each other;
-     * they only abort if a *newer* search/reset supersedes the batch.
-     * Returns false if superseded or if a fetch genuinely failed.
-     */
-    async revealPath(path: string, generation: number): Promise<boolean> {
-      try {
-        for (const dirPath of ancestorPathsOf(path)) {
-          await this.ensureDirLoaded(dirPath);
-          if (generation !== this.expandWalkGeneration) return false;
-        }
-
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    /**
-     * Reveals every match beyond index 0 (jumpToMatch(0) already reveals
-     * that one) in the background, so the whole result set becomes visible
-     * in the tree without clicking through each one individually. Matches
-     * stream in as each shared ancestor directory's listing resolves
-     * (ensureDirLoaded() dedupes concurrent requests for the same
-     * directory), rather than all appearing at once -- deliberately not
-     * awaited or surfaced as an error; a background reveal failing quietly
-     * for one match shouldn't affect the others.
-     */
-    revealRemainingMatches(matches: ContainerSearchMatch[]) {
-      const generation = this.expandWalkGeneration;
-
-      matches.forEach((match, index) => {
-        if (index === 0) return;
-        this.revealPath(match.path, generation).then(() => this.markRevealed(index, generation));
-      });
-    },
-    /**
-     * Records that fullSearchMatches[index]'s reveal has settled, unless a
-     * newer search/reset has since superseded `generation`.
-     */
-    markRevealed(index: number, generation: number) {
-      if (generation !== this.expandWalkGeneration) return;
-      this.revealedMatchIndices.add(index);
-    },
-    /**
-     * Reveals fullSearchMatches[index] (see revealPath()), then scrolls to
-     * and highlights it as the current match. `navigationSequence` (bumped
-     * on every call, unlike the shared `generation` snapshot) lets a newer
-     * jump/next/previous supersede an in-flight one -- e.g. rapid double
-     * clicks -- without that also aborting the unrelated background reveal
-     * of other matches.
-     */
-    async jumpToMatch(index: number) {
-      const match = this.fullSearchMatches[index];
-
-      if (!match) return;
-      this.fullSearchCurrentIndex = index;
-      const generation = this.expandWalkGeneration;
-      const navigation = ++this.navigationSequence;
-      const revealed = await this.revealPath(match.path, generation);
-
-      this.markRevealed(index, generation);
-      if (generation !== this.expandWalkGeneration || navigation !== this.navigationSequence) return;
-      if (!revealed) {
-        this.fullSearchError = this.t('containerFiles.search.revealFailed', { path: match.path });
-
-        return;
-      }
-      await this.$nextTick();
-      if (generation !== this.expandWalkGeneration || navigation !== this.navigationSequence) return;
-      this.scrollToRow(match.path);
-    },
-    scrollToRow(path: string) {
-      const el = (this.$el as HTMLElement).querySelector(`[data-tree-row-path="${ CSS.escape(path) }"]`);
-
-      if (!el) return;
-      el.scrollIntoView({ block: 'center' });
-      this.highlightedMatchPath = path;
-    },
-    /** Resets both the instant local filter and the full-search state -- they share one text box. */
-    clearSearch() {
-      this.searchInput = '';
-      this.filterQuery = '';
-      this.expandWalkGeneration++;
-      this.navigationSequence++;
-      this.fullSearchStatus = 'idle';
-      this.fullSearchMatches = [];
-      this.fullSearchTruncated = false;
-      this.fullSearchTotalMatchCount = null;
-      this.fullSearchRequestId = null;
-      this.fullSearchCurrentIndex = 0;
-      this.fullSearchError = null;
-      this.highlightedMatchPath = null;
-      this.revealedMatchIndices = new Set();
-    },
+    // Exposed as a method (rather than only via treeContext, like
+    // getFileIcon/diffBadgeColor/formatDate) because this component's own
+    // template also calls it directly for the "too large to preview" banner.
+    formatSize,
   },
 });
 </script>
@@ -1352,18 +977,6 @@ export default defineComponent({
   // A visual floor complementing paneBounds()'s own MIN_PANE_HEIGHT JS clamp
   // -- see .file-panel's own min-height comment above.
   min-height: 120px;
-}
-
-// The global .btn/.btn-sm rules (assets/styles/global/_button.scss) center
-// icon-only content via padding + line-height, which works for a baseline-
-// aligned glyph but leaves an icon font's own glyph-box asymmetry (the "X"
-// visibly sits left-of-center) uncorrected -- centering the icon as a flex
-// child instead centers its actual box within the button, independent of
-// the icon font's internal metrics.
-.preview-close-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .preview-header {

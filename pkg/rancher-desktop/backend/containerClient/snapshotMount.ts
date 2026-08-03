@@ -43,13 +43,11 @@ export async function execCommandWithRetries(vm: VMExecutor, options: execOption
  * failures (best-effort; the caller is expected to already be unwinding
  * from some other error, so one cleanup failing must not mask the rest).
  */
-export async function runCleanups(cleanups: (() => Promise<unknown>)[], onError?: (ex: unknown) => void) {
+export async function runCleanups(cleanups: (() => Promise<unknown>)[]) {
   for (const cleanup of cleanups.reverse()) {
     try {
       await cleanup();
-    } catch (ex) {
-      onError?.(ex);
-    }
+    } catch {}
   }
 }
 

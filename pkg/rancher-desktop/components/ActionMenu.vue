@@ -121,13 +121,12 @@ export default {
       return options.length !== undefined ? options.length : Object.keys(options).length > 0;
     },
 
-    /** All real (non-divider-only, non-"no actions") menu item elements, in rendered order. */
+    /** All real (non-divider, non-"no actions") menu item elements, in rendered order. */
     menuItems() {
       const refs = this.$refs.menuItem;
+      const all = refs ? (Array.isArray(refs) ? refs : [refs]) : [];
 
-      if (!refs) return [];
-
-      return Array.isArray(refs) ? refs : [refs];
+      return all.filter(el => !el.classList.contains('divider'));
     },
 
     focusFirstItem() {
