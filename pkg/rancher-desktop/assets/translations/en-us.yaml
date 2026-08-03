@@ -969,6 +969,8 @@ containerInspect:
     readWrite: RW
     # @meaning Mount is read-only
     readOnly: RO
+    # @context Title/aria-label on a mount's destination path, which is clickable and jumps to that path in the Files tab
+    openInFiles: Open in Files tab
   command:
     entrypoint: Entrypoint
     command: Command

@@ -77,7 +77,17 @@
               >
                 <td>{{ mount.Type }}</td>
                 <td>{{ mount.Source }}</td>
-                <td>{{ mount.Destination }}</td>
+                <td>
+                  <button
+                    class="mount-destination-link"
+                    :title="t('containerInspect.mounts.openInFiles')"
+                    :aria-label="`${ mount.Destination } - ${ t('containerInspect.mounts.openInFiles') }`"
+                    data-testid="mount-destination-link"
+                    @click="emit('reveal-path', mount.Destination)"
+                  >
+                    {{ mount.Destination }}
+                  </button>
+                </td>
                 <td>{{ mount.RW ? t('containerInspect.mounts.readWrite') : t('containerInspect.mounts.readOnly') }}</td>
               </tr>
             </tbody>
@@ -261,6 +271,9 @@ const props = defineProps<{
   containerId: string;
   namespace:   string | undefined;
 }>();
+
+/** Emitted when a mount's destination path is clicked, so the parent can switch to and reveal it in the Files tab. */
+const emit = defineEmits<{ (e: 'reveal-path', path: string): void }>();
 
 const store = useStore();
 const t = (key: string, args?: Record<string, unknown>) => store.getters['i18n/t'](key, args);
@@ -459,6 +472,29 @@ const formatDate = (iso: string): string => {
     width: 120px;
     color: var(--muted);
     font-weight: 500;
+  }
+}
+
+// A plain inline link, not the global .btn -- that class is sized (padding,
+// min-height) for a toolbar button, not text inside a compact table cell.
+.mount-destination-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--link);
+  text-decoration: underline;
+  cursor: pointer;
+  text-align: left;
+
+  &:hover {
+    color: var(--link-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
   }
 }
 

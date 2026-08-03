@@ -323,6 +323,19 @@ export default defineComponent({
       type:    String,
       default: undefined,
     },
+    /**
+     * A path to reveal/scroll-to/highlight once, right after this component
+     * mounts -- e.g. a mount destination clicked on the Info tab. Read only
+     * in mounted(), never watched: ContainerInfo.vue's `v-if` fully
+     * destroys and recreates this component on every tab switch, so a new
+     * value always arrives via a fresh mount, never while already mounted.
+     * Deliberately not named `revealPath`, which would collide with
+     * fileSearchMixin's method of that name once merged onto `this`.
+     */
+    initialRevealPath: {
+      type:    String,
+      default: null,
+    },
   },
   data(): Data {
     return {
@@ -431,6 +444,7 @@ export default defineComponent({
     ipcRenderer.on('container-files/stopped', this.onStopped);
 
     this.openSession();
+    this.revealInitialPath();
   },
   beforeUnmount() {
     ipcRenderer.send('container-files/close', this.containerId);
@@ -501,6 +515,27 @@ export default defineComponent({
       ipcRenderer.send('container-files/diff', this.containerId);
       ipcRenderer.send('container-files/mounts', this.containerId);
       this.requestList('/');
+    },
+    /**
+     * Expands ancestors of, then scrolls to and highlights, `initialRevealPath`
+     * -- mirrors jumpToMatch()'s own shape (fileSearchMixin.ts), reusing its
+     * revealPath()/scrollToRow() rather than duplicating the ancestor-walk.
+     * Silently no-ops if the path can't be revealed (e.g. permission error,
+     * or it's not actually part of the browsable tree) -- same graceful
+     * degradation a failed search-reveal already has, not worth a dedicated
+     * error banner for what should be a rare edge case.
+     */
+    async revealInitialPath() {
+      const path = this.initialRevealPath;
+
+      if (!path) return;
+      const generation = this.expandWalkGeneration;
+      const revealed = await this.revealPath(path, generation);
+
+      if (generation !== this.expandWalkGeneration || !revealed) return;
+      await this.$nextTick();
+      if (generation !== this.expandWalkGeneration) return;
+      this.scrollToRow(path);
     },
     onCapabilities(_event: unknown, containerId: string, result: ContainerFilesCapabilities) {
       if (this.isStale(containerId)) return;

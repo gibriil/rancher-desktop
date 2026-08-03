@@ -108,6 +108,7 @@
           v-if="containerId && activeTab === 'tab-info'"
           :container-id="containerId"
           :namespace="namespace"
+          @reveal-path="onRevealMountPath"
         />
         <container-stats
           v-if="containerId && activeTab === 'tab-stats'"
@@ -136,6 +137,7 @@
           :is-container-running="isRunning"
           :container-state="containerState"
           :namespace="namespace"
+          :initial-reveal-path="filesRevealPath"
         />
       </div>
     </rd-tabbed>
@@ -174,6 +176,11 @@ const subscribeTimer = ref<ReturnType<typeof setTimeout>>();
 const searchTerm = ref('');
 const activeTab = ref<'tab-info' | 'tab-stats' | 'tab-logs' | 'tab-shell' | 'tab-files'>('tab-info');
 const shellEverActivated = ref(false);
+// Set by a mount-destination click on the Info tab, read once by ContainerFiles.vue when it
+// mounts fresh for the Files tab. Cleared below whenever the user leaves the Files tab, so a
+// later, unrelated visit (via the tab header itself) doesn't see a stale path from a previous
+// mount click and re-trigger a reveal the user didn't ask for this time.
+const filesRevealPath = ref<string | null>(null);
 
 // Vuex integration
 const isK8sReady = computed(() => store.getters['k8sManager/isReady']);
@@ -223,6 +230,9 @@ watch(activeTab, (tab) => {
     shellEverActivated.value = true;
     nextTick(() => containerShell.value?.focus());
   }
+  if (tab !== 'tab-files') {
+    filesRevealPath.value = null;
+  }
 });
 
 // Methods as functions
@@ -262,6 +272,11 @@ const clearSearch = () => {
   nextTick(() => {
     searchInput.value?.focus();
   });
+};
+
+const onRevealMountPath = (path: string) => {
+  filesRevealPath.value = path;
+  activeTab.value = 'tab-files';
 };
 
 const handleSearchKeydown = (event: KeyboardEvent) => {
