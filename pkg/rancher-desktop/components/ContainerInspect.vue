@@ -79,7 +79,7 @@
                 <td>{{ mount.Source }}</td>
                 <td>
                   <button
-                    class="mount-destination-link"
+                    class="mount-destination-link role-link"
                     :title="t('containerInspect.mounts.openInFiles')"
                     :aria-label="`${ mount.Destination } - ${ t('containerInspect.mounts.openInFiles') }`"
                     data-testid="mount-destination-link"
@@ -477,6 +477,8 @@ const formatDate = (iso: string): string => {
 
 // A plain inline link, not the global .btn -- that class is sized (padding,
 // min-height) for a toolbar button, not text inside a compact table cell.
+// role-link identifies the button's visual role and avoids the global
+// missing-role development outline.
 .mount-destination-link {
   background: none;
   border: none;
